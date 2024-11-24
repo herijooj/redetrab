@@ -71,3 +71,48 @@ void debug_packet(const char *prefix, const struct Packet *packet) {
         debug_hex_dump("  ", packet->data, packet->length & 0x3F);
     }
 }
+
+void init_packet_stats(struct PacketStats *stats) {
+    memset(stats, 0, sizeof(struct PacketStats));
+}
+
+void update_packet_stats(struct PacketStats *stats, size_t bytes, int is_send) {
+    stats->total_bytes += bytes;
+    if (is_send) {
+        stats->packets_sent++;
+    } else {
+        stats->packets_received++;
+    }
+}
+
+void init_transfer_stats(struct TransferStats *stats, size_t expected_size) {
+    memset(stats, 0, sizeof(struct TransferStats));
+    stats->total_expected = expected_size;
+}
+
+void update_transfer_stats(struct TransferStats *stats, size_t bytes, uint8_t seq) {
+    stats->total_received += bytes;
+    stats->packets_processed++;
+    
+    // Check for sequence gaps
+    if (stats->packets_processed > 1 && 
+        ((seq & SEQ_MASK) != ((stats->last_sequence + 1) & SEQ_MASK))) {
+        DBG_WARN("Sequence gap detected: last=%u, current=%u\n", 
+                stats->last_sequence, seq);
+        stats->had_errors = 1;
+    }
+    stats->last_sequence = seq;
+}
+
+void print_transfer_summary(const struct TransferStats *stats) {
+    DBG_INFO("Transfer Summary:\n");
+    DBG_INFO("  Expected: %zu bytes\n", stats->total_expected);
+    DBG_INFO("  Received: %zu bytes\n", stats->total_received);
+    DBG_INFO("  Packets:  %zu\n", stats->packets_processed);
+    DBG_INFO("  Status:   %s\n", stats->had_errors ? "Had errors" : "Clean");
+    
+    if (stats->total_expected != stats->total_received) {
+        DBG_ERROR("Transfer incomplete! Missing %zd bytes\n",
+                 stats->total_expected - stats->total_received);
+    }
+}

@@ -30,7 +30,7 @@
 // Add these mask definitions
 #define TYPE_MASK  0x1F    // 5-bit mask for packet type
 #define SEQ_MASK   0x1F    // 5-bit mask for sequence number
-#define LEN_MASK   0x3F    // 6-bit mask for length
+#define LEN_MASK   0xFFFF  // Updated mask for 16-bit length
 
 // Add debug flags
 #define DBG_PACKETS 1      // Set to 1 to enable detailed packet debugging
@@ -40,13 +40,14 @@
 struct Packet {
     uint8_t start_marker;    // 8 bits
     uint8_t proto_marker;    // Protocol identifier
-    uint8_t node_type;      // Source node type
-    uint8_t length;         // 6 bits (masked)
-    uint8_t sequence;       // 5 bits (masked)
-    uint8_t type;          // 5 bits (masked)
-    uint8_t crc;           // 8 bits
+    uint8_t node_type;       // Source node type
+    uint16_t length;         // 16 bits (updated)
+    uint8_t sequence;        // 5 bits (masked)
+    uint8_t type;            // 5 bits (masked)
+    uint8_t crc;             // 8 bits
     char data[MAX_DATA_SIZE];
 };
+
 
 typedef struct Packet Packet;  // Add typedef after struct definition
 
@@ -54,9 +55,21 @@ typedef struct Packet Packet;  // Add typedef after struct definition
 
 // ...rest of existing code...
 
-#define MAX_RETRIES 3
-#define RETRY_DELAY_MS 100
-#define SOCKET_TIMEOUT_MS 1000
+// Add packet statistics structure
+struct PacketStats {
+    size_t total_bytes;
+    size_t packets_sent;
+    size_t packets_received;
+    size_t retries;
+};
+
+// Keep only PacketStats-related functions
+void init_packet_stats(struct PacketStats *stats);
+void update_packet_stats(struct PacketStats *stats, size_t bytes, int is_send);
+
+#define MAX_RETRIES 5
+#define RETRY_DELAY_MS 200
+#define SOCKET_TIMEOUT_MS 2000  // Increased timeout for large files
 
 // Remove the old DEBUG macro
 

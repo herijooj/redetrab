@@ -54,3 +54,5 @@ dkms.conf
 
 # add backup folder
 backup/
+client
+server

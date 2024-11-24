@@ -92,14 +92,18 @@ int set_socket_timeout(int socket, int timeout_ms) {
 uint8_t calculate_crc(Packet *packet) {
     uint8_t crc = 0;
     crc ^= packet->start_marker;
-    crc ^= packet->length;
+    crc ^= packet->proto_marker;
+    crc ^= packet->node_type;
+    crc ^= (packet->length & 0xFF);        // Lower byte
+    crc ^= ((packet->length >> 8) & 0xFF); // Upper byte
     crc ^= packet->sequence;
     crc ^= packet->type;
-    for (int i = 0; i < (packet->length & 0x3F); i++) {
+    for (int i = 0; i < (ntohs(packet->length) & LEN_MASK); i++) {
         crc ^= packet->data[i];
     }
     return crc;
 }
+
 
 int send_packet(int socket, Packet *packet, struct sockaddr_ll *addr) {
     packet->start_marker = START_MARKER;
@@ -108,15 +112,15 @@ int send_packet(int socket, Packet *packet, struct sockaddr_ll *addr) {
     // Apply masks to ensure fields are within bounds
     packet->type &= TYPE_MASK;
     packet->sequence &= SEQ_MASK;
-    packet->length &= LEN_MASK;
+    packet->length = htons(packet->length & LEN_MASK); // Updated
     
     packet->crc = calculate_crc(packet);
     
     debug_packet("TX", packet);
     DBG_TRACE("Sending packet: start=0x%02x, proto=0x%02x, type=0x%02x, seq=%d, len=%d\n",
              packet->start_marker, packet->proto_marker, packet->type,
-             packet->sequence, packet->length);
-
+             packet->sequence, ntohs(packet->length)); // Updated
+    
     ssize_t sent = sendto(socket, packet, sizeof(Packet), 0, 
                          (struct sockaddr *)addr, sizeof(*addr));
     if (sent < 0) {
@@ -159,8 +163,9 @@ int receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr, int loc
         }
 
         // Validate length field
-        if ((packet->length & LEN_MASK) > MAX_DATA_SIZE) {
-            DBG_WARN("Invalid length: %d\n", packet->length & LEN_MASK);
+        size_t data_len = ntohs(packet->length) & LEN_MASK; // Updated
+        if (data_len > MAX_DATA_SIZE) {
+            DBG_WARN("Invalid length: %zu\n", data_len);
             continue;
         }
 
@@ -173,10 +178,14 @@ int receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr, int loc
             continue;
         }
 
+        // Update packet.length to be in host byte order
+        packet->length = data_len; // Added line
+
         debug_packet("RX", packet);
         return received;
     }
 }
+
 
 // Modify the wait_for_ack function to accept local_node_type
 int wait_for_ack(int socket, Packet *packet, struct sockaddr_ll *addr, uint8_t expected_type, int local_node_type) {

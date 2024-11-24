@@ -2,6 +2,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdbool.h>
 
 // Update function prototypes to include node_type
 void backup_file(int socket, char *filename, struct sockaddr_ll *addr, int node_type);
@@ -48,105 +49,118 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr, int node_
         DBG_ERROR("Cannot open file %s: %s\n", filename, strerror(errno));
         return;
     }
+
+    struct stat st;
+    if (fstat(fd, &st) < 0) {
+        DBG_ERROR("Cannot stat file: %s\n", strerror(errno));
+        close(fd);
+        return;
+    }
     
+    size_t total_size = st.st_size;
+    DBG_INFO("File size: %ld bytes\n", (long)total_size);
+
+    struct TransferStats stats;
+    init_transfer_stats(&stats, total_size);
+    
+    // Calculate total chunks
+    size_t total_chunks = (total_size + MAX_DATA_SIZE - 1) / MAX_DATA_SIZE;
+    DBG_INFO("File will be sent in %zu chunks\n", total_chunks);
+
+    // Send initial backup packet with file info
     Packet packet = {0};
     packet.start_marker = START_MARKER;
     packet.proto_marker = PROTO_MARKER;
     packet.node_type = node_type;
     packet.type = PKT_BACKUP;
-    strncpy(packet.data, filename, MAX_DATA_SIZE - 1);
-    packet.data[MAX_DATA_SIZE - 1] = '\0';
-    packet.length = strlen(packet.data);
-    send_packet(socket, &packet, addr);
     
-    // Wait for initial ACK
-    if (receive_packet(socket, &packet, addr, NODE_CLIENT) <= 0 || 
-        (packet.type & 0x1F) != PKT_ACK) {
-        DBG_ERROR("Server did not acknowledge backup request\n");
-        close(fd);
-        return;
-    }
-    DBG_INFO("Received initial ACK\n");
-    
-    // Wait for size acknowledgment
-    if (receive_packet(socket, &packet, addr, NODE_CLIENT) <= 0) {
-        DBG_ERROR("No response for size acknowledgment\n");
-        close(fd);
-        return;
-    }
-    
-    debug_packet("RX (Size Acknowledgment)", &packet);
-    if ((packet.type & 0x1F) != PKT_OK_SIZE) {
-        DBG_ERROR("Server did not acknowledge size (got type 0x%02x)\n", packet.type);
-        close(fd);
-        return;
-    }
-    DBG_INFO("Size acknowledged by server\n");
+    // Pack filename and size
+    strncpy(packet.data, filename, MAX_DATA_SIZE - sizeof(size_t) - 1);
+    *((size_t *)(packet.data + strlen(filename) + 1)) = total_size;
+    packet.length = strlen(filename) + 1 + sizeof(size_t);
 
-    char buffer[MAX_DATA_SIZE];
-    ssize_t bytes;
-    uint8_t seq = 0;
-    size_t total_bytes = 0;
-    
-    set_socket_timeout(socket, SOCKET_TIMEOUT_MS);
-    
-    // Get file size for progress reporting
-    struct stat st;
-    if (fstat(fd, &st) == 0) {
-        DBG_INFO("File size: %ld bytes\n", (long)st.st_size);
+    if (send_packet(socket, &packet, addr) < 0 ||
+        wait_for_ack(socket, &packet, addr, PKT_ACK, NODE_CLIENT) != 0 ||
+        wait_for_ack(socket, &packet, addr, PKT_OK_SIZE, NODE_CLIENT) != 0) {
+        DBG_ERROR("Failed to initialize backup\n");
+        close(fd);
+        return;
     }
+
+    // Transfer file data with improved logging and validation
+    char buffer[MAX_DATA_SIZE];
+    uint8_t seq = 0;
     
-    while ((bytes = read(fd, buffer, MAX_DATA_SIZE)) > 0) {
-        total_bytes += bytes;
-        DBG_INFO("Reading chunk: %zd bytes (total: %zu)\n", bytes, total_bytes);
-        
+    while (stats.total_received < total_size) {
+        ssize_t bytes = read(fd, buffer, MAX_DATA_SIZE);
+        if (bytes <= 0) {
+            DBG_ERROR("Read error or EOF: %s\n", strerror(errno));
+            break;
+        }
+
+        size_t remaining = total_size - stats.total_received;
+        DBG_INFO("Preparing chunk: seq=%d, size=%zd, remaining=%zu\n",
+                 seq, bytes, remaining);
+
         int retries = 0;
-        while (retries < MAX_RETRIES) {
+        bool chunk_sent = false;
+        
+        while (retries < MAX_RETRIES && !chunk_sent) {
             packet.type = PKT_DATA;
             packet.sequence = seq;
-            packet.length = bytes;
+            packet.length = bytes; // Updated to use 16-bit
             memcpy(packet.data, buffer, bytes);
             
-            DBG_INFO("Sending DATA packet: seq=%d, len=%zd\n", seq, bytes);
-            if (send_packet(socket, &packet, addr) < 0) {
-                DBG_ERROR("Send failed\n");
+            if (send_packet(socket, &packet, addr) >= 0) {
+                if (wait_for_ack(socket, &packet, addr, PKT_OK, NODE_CLIENT) == 0) {
+                    update_transfer_stats(&stats, bytes, seq);
+                    seq = (seq + 1) & SEQ_MASK;
+                    chunk_sent = true;
+                    
+                    float progress = (float)stats.total_received / total_size * 100;
+                    DBG_INFO("Progress: %.1f%% (%zu/%zu bytes)\n", 
+                            progress, stats.total_received, total_size);
+                } else {
+                    DBG_WARN("No ACK received for seq %d\n", seq);
+                }
+            }
+            
+            if (!chunk_sent) {
                 retries++;
-                continue;
+                DBG_WARN("Retrying chunk seq=%d (attempt %d/%d)\n", 
+                         seq, retries, MAX_RETRIES);
+                usleep(RETRY_DELAY_MS * 1000);
             }
-            
-            if (wait_for_ack(socket, &packet, addr, PKT_OK, NODE_CLIENT) == 0) {
-                seq = (seq + 1) & SEQ_MASK;
-                break;
-            }
-            
-            retries++;
-            DBG_WARN("Retrying packet %d (attempt %d)\n", seq, retries);
-            usleep(RETRY_DELAY_MS * 1000);  // Add delay between retries
         }
         
-        if (retries >= MAX_RETRIES) {
-            DBG_ERROR("Max retries reached, transfer failed\n");
+        if (!chunk_sent) {
+            DBG_ERROR("Failed to send chunk after %d retries\n", MAX_RETRIES);
             close(fd);
             return;
         }
     }
-
-    if (bytes < 0) {
-        DBG_ERROR("Read error: %s\n", strerror(errno));
-        close(fd);
-        return;
-    }
-
-    DBG_INFO("File transfer complete: %zu bytes sent\n", total_bytes);
-    
-    // Send end of transmission
-    packet.type = PKT_END_TX;
-    send_packet(socket, &packet, addr);
-    
-    // Wait for checksum acknowledgment
-    if (receive_packet(socket, &packet, addr, NODE_CLIENT) > 0 && 
-        (packet.type & 0x1F) == PKT_OK_CHSUM) {
-        printf("Transfer completed successfully\n");
+    // Verify all data was sent before END_TX
+    if (stats.total_received == total_size) {
+        DBG_INFO("All chunks sent successfully, sending END_TX\n");
+        packet.type = PKT_END_TX;
+        packet.length = 0;
+        
+        // Retry END_TX if needed
+        int retries = 0;
+        while (retries < MAX_RETRIES) {
+            if (send_packet(socket, &packet, addr) >= 0 &&
+                wait_for_ack(socket, &packet, addr, PKT_OK_CHSUM, NODE_CLIENT) == 0) {
+                print_transfer_summary(&stats);
+                DBG_INFO("Transfer completed successfully\n");
+                break;
+            }
+            retries++;
+            DBG_WARN("Retrying END_TX (attempt %d/%d)\n", retries, MAX_RETRIES);
+            usleep(RETRY_DELAY_MS * 1000);
+        }
+    } else {
+        DBG_ERROR("Transfer incomplete: sent %zu/%zu bytes\n", 
+                  stats.total_received, total_size);
     }
     
     close(fd);
