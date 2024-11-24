@@ -1,6 +1,7 @@
 #ifndef SOCKETS_H
 #define SOCKETS_H
 
+// Remove duplicate includes
 #include <netinet/ip_icmp.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,7 +9,6 @@
 #include <arpa/inet.h>
 #include <netinet/ip.h>
 #include <sys/socket.h>
-#include <netinet/ip_icmp.h>
 #include <unistd.h>
 #include <linux/if_packet.h>
 #include <limits.h>
@@ -18,29 +18,47 @@
 #include <net/ethernet.h>
 
 #define PACKET_SIZE 64
-
+#define MAX_DATA_SIZE 1024  // Move this before Packet struct
 #define START_MARKER 0xAA
 #define TIMEOUT_SEC 5
-#define MAX_DATA_SIZE 1024
+
+// Add protocol identifier and node type
+#define PROTO_MARKER 0x42  // Protocol identifier
+#define NODE_SERVER  0x01
+#define NODE_CLIENT  0x02
+
+// Add these mask definitions
+#define TYPE_MASK  0x1F    // 5-bit mask for packet type
+#define SEQ_MASK   0x1F    // 5-bit mask for sequence number
+#define LEN_MASK   0x3F    // 6-bit mask for length
+
+// Add debug flags
+#define DBG_PACKETS 1      // Set to 1 to enable detailed packet debugging
+#define EXTENDED_VALIDATION 1  // Set to 1 to enable additional validation checks
+
+// Define struct Packet (not typedef) for consistency with debug.h
+struct Packet {
+    uint8_t start_marker;    // 8 bits
+    uint8_t proto_marker;    // Protocol identifier
+    uint8_t node_type;      // Source node type
+    uint8_t length;         // 6 bits (masked)
+    uint8_t sequence;       // 5 bits (masked)
+    uint8_t type;          // 5 bits (masked)
+    uint8_t crc;           // 8 bits
+    char data[MAX_DATA_SIZE];
+};
+
+typedef struct Packet Packet;  // Add typedef after struct definition
+
+#include "debug.h"
+
+// ...rest of existing code...
 
 #define MAX_RETRIES 3
 #define RETRY_DELAY_MS 100
 #define SOCKET_TIMEOUT_MS 1000
 
-// Debug macro
-#define DEBUG 1
-#define debug_print(fmt, ...) \
-    do { if (DEBUG) fprintf(stderr, "%s:%d:%s(): " fmt, __FILE__, \
-            __LINE__, __func__, ##__VA_ARGS__); } while (0)
-
-typedef struct {
-    uint8_t start_marker;    // 8 bits
-    uint8_t length;          // 6 bits (masked)
-    uint8_t sequence;        // 5 bits (masked)
-    uint8_t type;           // 5 bits (masked)
-    uint8_t crc;            // 8 bits
-    char data[MAX_DATA_SIZE];
-} Packet;
+// Remove the old DEBUG macro
 
 // Packet types (according to codigos.md)
 #define PKT_ACK       0x03  // 00011 Ack
@@ -74,21 +92,18 @@ int create_raw_socket();
 int cria_raw_socket(char *nome_interface_rede);
 
 // Global variables for interface configuration
-extern int g_ifindex;
-extern unsigned char g_if_hwaddr[ETH_ALEN];
-
-// Global socket address structure
-extern struct sockaddr_ll g_socket_addr;
+// extern int g_ifindex;
+// extern unsigned char g_if_hwaddr[ETH_ALEN];
+// extern struct sockaddr_ll g_socket_addr;
 
 // Function prototypes - fix duplicates and add sockaddr_ll
 uint8_t calculate_crc(Packet *packet);
 int send_packet(int socket, Packet *packet, struct sockaddr_ll *addr);
-int receive_packet(int socket, Packet *packet);
+int receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr, int local_node_type);
 void send_ack(int socket, struct sockaddr_ll *addr, uint8_t type);
 void send_error(int socket, struct sockaddr_ll *addr, uint8_t error_code);
 int set_socket_timeout(int socket, int timeout_ms);
-int handle_packet_error(int socket, struct sockaddr_ll *addr, int error_code);
-int wait_for_ack(int socket, Packet *packet, uint8_t expected_type);
+int wait_for_ack(int socket, Packet *packet, struct sockaddr_ll *addr, uint8_t expected_type, int local_node_type);
 int get_interface_info(int socket, char *interface, struct sockaddr_ll *addr);
 
 #endif // SOCKETS_H

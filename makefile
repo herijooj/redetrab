@@ -3,11 +3,11 @@ CFLAGS=-Wall -g
 
 all: server client
 
-server: server.c sockets.c
-	$(CC) $(CFLAGS) -o server server.c sockets.c
+server: server.c sockets.c debug.c debug.h
+	$(CC) $(CFLAGS) -o server server.c sockets.c debug.c
 
-client: client.c sockets.c
-	$(CC) $(CFLAGS) -o client client.c sockets.c
+client: client.c sockets.c debug.c debug.h
+	$(CC) $(CFLAGS) -o client client.c sockets.c debug.c
 
 clean:
 	rm -f server client *.o

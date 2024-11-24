@@ -6,53 +6,48 @@
 #include <stdio.h>
 
 // Initialize global variables
-int g_ifindex = 0;
-unsigned char g_if_hwaddr[ETH_ALEN];
-struct sockaddr_ll g_socket_addr = {0};
+// int g_ifindex = 0;
+// unsigned char g_if_hwaddr[ETH_ALEN];
+// struct sockaddr_ll g_socket_addr = {0};
 
 int get_interface_info(int socket, char *interface, struct sockaddr_ll *addr) {
     struct ifreq if_idx;
     struct ifreq if_mac;
     
     memset(&if_idx, 0, sizeof(if_idx));
-    strncpy(if_idx.ifr_name, interface, IFNAMSIZ-1);
+    strncpy(if_idx.ifr_name, interface, IFNAMSIZ - 1);
     if (ioctl(socket, SIOCGIFINDEX, &if_idx) < 0) {
         perror("SIOCGIFINDEX");
         return -1;
     }
-    g_ifindex = if_idx.ifr_ifindex;
+    int ifindex = if_idx.ifr_ifindex;
 
     memset(&if_mac, 0, sizeof(if_mac));
-    strncpy(if_mac.ifr_name, interface, IFNAMSIZ-1);
+    strncpy(if_mac.ifr_name, interface, IFNAMSIZ - 1);
     if (ioctl(socket, SIOCGIFHWADDR, &if_mac) < 0) {
         perror("SIOCGIFHWADDR");
         return -1;
     }
-    memcpy(g_if_hwaddr, if_mac.ifr_hwaddr.sa_data, ETH_ALEN);
 
-    // Initialize global socket address
-    memset(&g_socket_addr, 0, sizeof(g_socket_addr));
-    g_socket_addr.sll_family = AF_PACKET;
-    g_socket_addr.sll_protocol = htons(ETH_P_ALL);
-    g_socket_addr.sll_ifindex = g_ifindex;
-    g_socket_addr.sll_halen = ETH_ALEN;
-    memcpy(g_socket_addr.sll_addr, g_if_hwaddr, ETH_ALEN);
+    // Initialize socket address
+    memset(addr, 0, sizeof(struct sockaddr_ll));
+    addr->sll_family = AF_PACKET;
+    addr->sll_protocol = htons(ETH_P_ALL);
+    addr->sll_ifindex = ifindex;
+    addr->sll_halen = ETH_ALEN;
+    memcpy(addr->sll_addr, if_mac.ifr_hwaddr.sa_data, ETH_ALEN);
 
-    if (addr) {
-        memcpy(addr, &g_socket_addr, sizeof(*addr));
-    }
-    
     return 0;
 }
 
 int cria_raw_socket(char *nome_interface_rede)
 {
-    debug_print("Creating raw socket on interface %s\n", nome_interface_rede);
+    DBG_INFO("Creating raw socket on interface %s\n", nome_interface_rede);
     int soquete = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
 
     if (soquete == -1)
     {
-        fprintf(stderr, "Erro ao criar socket: Verifique se voce eh root!\n");
+        DBG_ERROR("Error creating socket: Root privileges required!\n");
         exit(-1);
     }
 
@@ -68,7 +63,7 @@ int cria_raw_socket(char *nome_interface_rede)
     }
 
     struct packet_mreq mr = {0};
-    mr.mr_ifindex = g_ifindex;
+    mr.mr_ifindex = endereco.sll_ifindex;
     mr.mr_type = PACKET_MR_PROMISC;
 
     // Não joga fora o que identifica como lixo: Modo promíscuo
@@ -88,7 +83,7 @@ int set_socket_timeout(int socket, int timeout_ms) {
     tv.tv_usec = (timeout_ms % 1000) * 1000;
     
     if (setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
-        debug_print("Failed to set socket timeout\n");
+        DBG_ERROR("Failed to set socket timeout\n");
         return -1;
     }
     return 0;
@@ -107,87 +102,101 @@ uint8_t calculate_crc(Packet *packet) {
 }
 
 int send_packet(int socket, Packet *packet, struct sockaddr_ll *addr) {
-    debug_print("Sending packet type: 0x%02x, seq: %d, len: %d\n", 
-                packet->type, packet->sequence, packet->length);
     packet->start_marker = START_MARKER;
+    packet->proto_marker = PROTO_MARKER;
+    
+    // Apply masks to ensure fields are within bounds
+    packet->type &= TYPE_MASK;
+    packet->sequence &= SEQ_MASK;
+    packet->length &= LEN_MASK;
+    
     packet->crc = calculate_crc(packet);
-
-    // Ensure addr is properly initialized
-    if (!addr->sll_ifindex) {
-        debug_print("Error: socket address not properly initialized\n");
-        return -1;
-    }
+    
+    debug_packet("TX", packet);
+    DBG_TRACE("Sending packet: start=0x%02x, proto=0x%02x, type=0x%02x, seq=%d, len=%d\n",
+             packet->start_marker, packet->proto_marker, packet->type,
+             packet->sequence, packet->length);
 
     ssize_t sent = sendto(socket, packet, sizeof(Packet), 0, 
                          (struct sockaddr *)addr, sizeof(*addr));
     if (sent < 0) {
-        debug_print("sendto failed: %s\n", strerror(errno));
+        DBG_ERROR("sendto failed: %s\n", strerror(errno));
         return -1;
     }
     
-    debug_print("Successfully sent %zd bytes\n", sent);
     return sent;
 }
 
-int receive_packet(int socket, Packet *packet) {
-    struct sockaddr_ll addr;
-    socklen_t addr_len = sizeof(addr);
+// Modify the receive_packet function signature to include local_node_type
+int receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr, int local_node_type) {
+    socklen_t addr_len = sizeof(*addr);
     
-    ssize_t received = recvfrom(socket, packet, sizeof(Packet), 0,
-                               (struct sockaddr *)&addr, &addr_len);
-    debug_print("Received %zd bytes\n", received);
-    if (received <= 0) return -1;
-    
-    debug_print("Packet type: 0x%02x, seq: %d, len: %d\n", 
-                packet->type, packet->sequence, packet->length);
+    while (1) {
+        ssize_t received = recvfrom(socket, packet, sizeof(Packet), 0,
+                                  (struct sockaddr *)addr, &addr_len);
+        if (received <= 0) {
+            DBG_TRACE("No packet received or error: %s\n", strerror(errno));
+            return -1;
+        }
 
-    // Ensure sll_halen and sll_addr are set
-    addr.sll_family = AF_PACKET;
-    addr.sll_protocol = htons(ETH_P_ALL);
-    addr.sll_halen = ETH_ALEN;
-    if (addr.sll_pkttype == PACKET_OUTGOING) {
-        // Ignore outgoing packets
-        return -1;
+        DBG_TRACE("Raw packet received: size=%zd, start=0x%02x, proto=0x%02x, type=0x%02x\n",
+                 received, packet->start_marker, packet->proto_marker, packet->type);
+
+        // Enhanced validation with detailed logging
+        if (received < sizeof(struct Packet)) {
+            DBG_WARN("Packet too small: %zd bytes\n", received);
+            continue;
+        }
+        
+        if (packet->start_marker != START_MARKER) {
+            DBG_WARN("Invalid start marker: 0x%02x\n", packet->start_marker);
+            continue;
+        }
+        
+        if (packet->proto_marker != PROTO_MARKER) {
+            DBG_WARN("Invalid protocol marker: 0x%02x\n", packet->proto_marker);
+            continue;
+        }
+
+        // Validate length field
+        if ((packet->length & LEN_MASK) > MAX_DATA_SIZE) {
+            DBG_WARN("Invalid length: %d\n", packet->length & LEN_MASK);
+            continue;
+        }
+
+        // CRC validation with detailed error
+        uint8_t computed_crc = calculate_crc(packet);
+        if (packet->crc != computed_crc) {
+            DBG_WARN("CRC mismatch: computed=0x%02x, received=0x%02x\n", 
+                    computed_crc, packet->crc);
+            debug_hex_dump("Packet dump: ", packet, sizeof(struct Packet));
+            continue;
+        }
+
+        debug_packet("RX", packet);
+        return received;
     }
-
-    // Store sender's address in global socket address
-    memcpy(&g_socket_addr, &addr, sizeof(g_socket_addr));
-
-    if (packet->start_marker != START_MARKER) return -1;
-    if (packet->crc != calculate_crc(packet)) return -1;
-    
-    return received;
 }
 
-int wait_for_ack(int socket, Packet *packet, uint8_t expected_type) {
+// Modify the wait_for_ack function to accept local_node_type
+int wait_for_ack(int socket, Packet *packet, struct sockaddr_ll *addr, uint8_t expected_type, int local_node_type) {
     int retries = 0;
     while (retries < MAX_RETRIES) {
-        if (receive_packet(socket, packet) > 0) {
+        if (receive_packet(socket, packet, addr, local_node_type) > 0) {
             if ((packet->type & 0x1F) == expected_type) {
                 return 0;
             }
             if ((packet->type & 0x1F) == PKT_NACK) {
-                debug_print("Received NACK\n");
+                DBG_WARN("Received NACK\n");
                 return -1;
             }
         }
         retries++;
-        debug_print("No ACK received, retry %d\n", retries);
+        DBG_WARN("No ACK received, retry %d/%d\n", retries, MAX_RETRIES);
         usleep(RETRY_DELAY_MS * 1000);
     }
     return -1;
 }
 
-void send_ack(int socket, struct sockaddr_ll *addr, uint8_t type) {
-    Packet ack = {0};
-    ack.type = PKT_ACK | type;
-    send_packet(socket, &ack, addr);
-}
-
-void send_error(int socket, struct sockaddr_ll *addr, uint8_t error_code) {
-    Packet error = {0};
-    error.type = PKT_ERROR;
-    error.data[0] = error_code;
-    error.length = 1;
-    send_packet(socket, &error, addr);
-}
+// Remove send_ack and send_error functions as they're now in server.c
+// Delete these functions to avoid duplication
