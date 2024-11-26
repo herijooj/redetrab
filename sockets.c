@@ -217,6 +217,4 @@ int wait_for_ack(int socket, Packet *packet, struct sockaddr_ll *addr, uint8_t e
     return -1;
 }
 
-
-// Remove send_ack and send_error functions as they're now in server.c
-// Delete these functions to avoid duplication
+// End of sockets.c

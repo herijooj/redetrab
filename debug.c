@@ -1,4 +1,5 @@
-// Debug.c - Debugging utilities =================================================================================
+// Debug.c - Debugging utilities 
+
 #include "debug.h"
 #include "sockets.h"
 #include <stdarg.h>
@@ -68,9 +69,9 @@ void debug_packet(const char *prefix, const struct Packet *packet) {
     }
 
     DBG_INFO("%s: type=%s seq=%d len=%d\n", 
-         prefix, type_str, packet->sequence, ntohs(packet->length));    
+         prefix, type_str, packet->sequence, packet->length);    
     if (debug_level >= DBG_LEVEL_TRACE) {
-        debug_hex_dump("  ", packet->data, packet->length & 0x3F);
+        debug_hex_dump("  ", packet->data, packet->length);
     }
 }
 
@@ -118,3 +119,5 @@ void print_transfer_summary(const struct TransferStats *stats) {
                  stats->total_expected - stats->total_received);
     }
 }
+
+// End of debug.c

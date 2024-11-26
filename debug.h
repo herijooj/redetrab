@@ -29,6 +29,7 @@ struct TransferStats {
     size_t total_received;
     size_t packets_processed;
     uint8_t last_sequence;
+    uint8_t expected_seq;  // Add this line
     int had_errors;
 };
 
