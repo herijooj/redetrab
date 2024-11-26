@@ -1,3 +1,4 @@
+// Debug.c - Debugging utilities =================================================================================
 #include "debug.h"
 #include "sockets.h"
 #include <stdarg.h>
@@ -50,23 +51,24 @@ void debug_packet(const char *prefix, const struct Packet *packet) {
     if (debug_level < DBG_LEVEL_INFO) return;
 
     const char *type_str;
-    switch (packet->type & 0x1F) {
-        case PKT_ACK: type_str = "ACK"; break;
-        case PKT_BACKUP: type_str = "BACKUP"; break;
-        case PKT_RESTORE: type_str = "RESTORE"; break;
-        case PKT_VERIFY: type_str = "VERIFY"; break;
-        case PKT_DATA: type_str = "DATA"; break;
-        case PKT_ERROR: type_str = "ERROR"; break;
-        case PKT_OK_SIZE: type_str = "OK_SIZE"; break;  // Add this case
-        case PKT_OK: type_str = "OK"; break;  // Add this case
-        case PKT_OK_CHSUM: type_str = "OK_CHSUM"; break;  // Add this case
-        case PKT_END_TX: type_str = "END_TX"; break;  // Add this case
-        default: type_str = "UNKNOWN"; break;
+    switch (packet->type & TYPE_MASK) {
+        case PKT_NACK:      type_str = "NACK"; break;
+        case PKT_OK:        type_str = "OK"; break;
+        case PKT_ACK:       type_str = "ACK"; break;
+        case PKT_BACKUP:    type_str = "BACKUP"; break;
+        case PKT_RESTORE:   type_str = "RESTORE"; break;
+        case PKT_VERIFY:    type_str = "VERIFY"; break;
+        case PKT_OK_CHSUM:  type_str = "OK_CHSUM"; break;
+        case PKT_OK_SIZE:   type_str = "OK_SIZE"; break;
+        case PKT_SIZE:      type_str = "SIZE"; break;
+        case PKT_DATA:      type_str = "DATA"; break;
+        case PKT_END_TX:    type_str = "END_TX"; break;
+        case PKT_ERROR:     type_str = "ERROR"; break;
+        default:            type_str = "UNKNOWN"; break;
     }
 
     DBG_INFO("%s: type=%s seq=%d len=%d\n", 
-             prefix, type_str, packet->sequence, packet->length);
-    
+         prefix, type_str, packet->sequence, ntohs(packet->length));    
     if (debug_level >= DBG_LEVEL_TRACE) {
         debug_hex_dump("  ", packet->data, packet->length & 0x3F);
     }
@@ -85,12 +87,12 @@ void update_packet_stats(struct PacketStats *stats, size_t bytes, int is_send) {
     }
 }
 
-void init_transfer_stats(struct TransferStats *stats, size_t expected_size) {
+void transfer_init_stats(struct TransferStats *stats, size_t expected_size) {
     memset(stats, 0, sizeof(struct TransferStats));
     stats->total_expected = expected_size;
 }
 
-void update_transfer_stats(struct TransferStats *stats, size_t bytes, uint8_t seq) {
+void transfer_update_stats(struct TransferStats *stats, size_t bytes, uint8_t seq) {
     stats->total_received += bytes;
     stats->packets_processed++;
     

@@ -1,7 +1,9 @@
+// Client.c - Client-side file backup, restore, and verification ============================================
 #include "sockets.h"
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stdbool.h>
 
 // Update function prototypes to include node_type
@@ -61,9 +63,8 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr, int node_
     DBG_INFO("File size: %ld bytes\n", (long)total_size);
 
     struct TransferStats stats;
-    init_transfer_stats(&stats, total_size);
-    
-    // Calculate total chunks
+    // Rename the function call
+    transfer_init_stats(&stats, total_size);
     size_t total_chunks = (total_size + MAX_DATA_SIZE - 1) / MAX_DATA_SIZE;
     DBG_INFO("File will be sent in %zu chunks\n", total_chunks);
 
@@ -98,6 +99,20 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr, int node_
             break;
         }
 
+        // Validate bytes read
+        if (bytes > MAX_DATA_SIZE) {
+            DBG_ERROR("Read more bytes than allowed: %zd\n", bytes);
+            close(fd);
+            return;
+        }
+
+        // Ensure not exceeding total_size
+        if (stats.total_received + bytes > total_size) {
+            DBG_ERROR("Attempting to send more data than total size\n");
+            close(fd);
+            return;
+        }
+
         size_t remaining = total_size - stats.total_received;
         DBG_INFO("Preparing chunk: seq=%d, size=%zd, remaining=%zu\n",
                  seq, bytes, remaining);
@@ -113,7 +128,7 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr, int node_
             
             if (send_packet(socket, &packet, addr) >= 0) {
                 if (wait_for_ack(socket, &packet, addr, PKT_OK, NODE_CLIENT) == 0) {
-                    update_transfer_stats(&stats, bytes, seq);
+                    transfer_update_stats(&stats, bytes, seq);
                     seq = (seq + 1) & SEQ_MASK;
                     chunk_sent = true;
                     
@@ -130,39 +145,48 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr, int node_
                 DBG_WARN("Retrying chunk seq=%d (attempt %d/%d)\n", 
                          seq, retries, MAX_RETRIES);
                 usleep(RETRY_DELAY_MS * 1000);
+                if (retries >= MAX_RETRIES) {
+                    DBG_ERROR("Failed to send chunk after %d retries\n", MAX_RETRIES);
+                    close(fd);
+                    return;  // Exit without sending PKT_END_TX
+                }
+            } else {               
+                float progress = (float)stats.total_received / total_size * 100;
+                DBG_INFO("Progress: %.1f%% (%zu/%zu bytes)\n", 
+                        progress, stats.total_received, total_size);
+
+                retries = 0;  // Reset retries after a successful send
             }
         }
-        
-        if (!chunk_sent) {
-            DBG_ERROR("Failed to send chunk after %d retries\n", MAX_RETRIES);
-            close(fd);
-            return;
-        }
     }
-    // Verify all data was sent before END_TX
+    // Only send PKT_END_TX if all data was sent successfully
     if (stats.total_received == total_size) {
         DBG_INFO("All chunks sent successfully, sending END_TX\n");
         packet.type = PKT_END_TX;
         packet.length = 0;
         
-        // Retry END_TX if needed
         int retries = 0;
-        while (retries < MAX_RETRIES) {
+        bool end_tx_sent = false;
+        while (retries < MAX_RETRIES && !end_tx_sent) {
             if (send_packet(socket, &packet, addr) >= 0 &&
                 wait_for_ack(socket, &packet, addr, PKT_OK_CHSUM, NODE_CLIENT) == 0) {
                 print_transfer_summary(&stats);
                 DBG_INFO("Transfer completed successfully\n");
-                break;
+                end_tx_sent = true;
+            } else {
+                retries++;
+                DBG_WARN("Retrying END_TX (attempt %d/%d)\n", retries, MAX_RETRIES);
+                usleep(RETRY_DELAY_MS * 1000);
             }
-            retries++;
-            DBG_WARN("Retrying END_TX (attempt %d/%d)\n", retries, MAX_RETRIES);
-            usleep(RETRY_DELAY_MS * 1000);
+        }
+
+        if (!end_tx_sent) {
+            DBG_ERROR("Failed to send END_TX after %d retries\n", MAX_RETRIES);
         }
     } else {
-        DBG_ERROR("Transfer incomplete: sent %zu/%zu bytes\n", 
-                  stats.total_received, total_size);
+        DBG_ERROR("Transfer incomplete, not sending END_TX\n");
     }
-    
+
     close(fd);
 }
 
@@ -235,3 +259,4 @@ void verify_file(int socket, char *filename, struct sockaddr_ll *addr, int node_
         fprintf(stderr, "No response from server\n");
     }
 }
+// ==========================================================================================================

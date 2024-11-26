@@ -1,4 +1,7 @@
+// Server.c - Server-side file backup, restore, and verification ============================================
 #include "sockets.h"
+// Add the following line to include debug.h
+#include "debug.h"
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -33,7 +36,7 @@ int main(int argc, char *argv[]) {
 
     while (1) {
         if (receive_packet(socket, &packet, &client_addr, NODE_SERVER) > 0) {
-            switch (packet.type & 0x1F) {
+            switch (packet.type & TYPE_MASK) {  // Ensure consistent mask usage
                 case PKT_BACKUP:
                     if (current_state != STATE_IDLE) {
                         send_error(socket, &client_addr, ERR_SEQUENCE);
@@ -95,9 +98,16 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
     }
 
     static uint8_t expected_seq = 0;
-    size_t data_len = packet->length; // Updated to use the already converted length
+    size_t data_len = ntohs(packet->length) & LEN_MASK;  // Convert from network byte order    
     if (data_len > MAX_DATA_SIZE) {
         DBG_ERROR("Invalid data length: %zu\n", data_len);
+        send_error(socket, addr, ERR_SEQUENCE);
+        return;
+    }
+    
+    // Validate total bytes received
+    if (stats->total_received + data_len > stats->total_expected) {
+        DBG_ERROR("Received more data than expected!\n");
         send_error(socket, addr, ERR_SEQUENCE);
         return;
     }
@@ -132,7 +142,8 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
         buf_ptr += written;
     }
     
-    update_transfer_stats(stats, data_len, packet->sequence);
+    transfer_update_stats(stats, data_len, packet->sequence);
+    expected_seq = (expected_seq + 1) & SEQ_MASK;
     expected_seq = (expected_seq + 1) & SEQ_MASK;
     
     // Add validation for total bytes received
@@ -148,10 +159,12 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
     ack.start_marker = START_MARKER;
     ack.proto_marker = PROTO_MARKER;
     ack.node_type = NODE_SERVER;
-    ack.type = PKT_OK;
+    ack.type = PKT_OK;  // Use defined constant
     ack.sequence = packet->sequence & SEQ_MASK;
     send_packet(socket, &ack, addr);
+
 }
+
 
 void handle_backup(int socket, Packet *packet, struct sockaddr_ll *addr) {
     // Extract file size and filename
@@ -159,8 +172,8 @@ void handle_backup(int socket, Packet *packet, struct sockaddr_ll *addr) {
     size_t file_size = *((size_t *)(packet->data + strlen(packet->data) + 1));
     
     struct TransferStats stats;
-    init_transfer_stats(&stats, file_size);
-    
+    // Correct the transfer_init_stats function call by removing the extra 'filename' argument
+    transfer_init_stats(&stats, file_size);
     DBG_INFO("Starting backup: file=%s, expected_size=%zu\n", 
              filename, file_size);
 
@@ -176,7 +189,13 @@ void handle_backup(int socket, Packet *packet, struct sockaddr_ll *addr) {
     current_fd = fd;
 
     // Set longer timeout for large files
-    set_socket_timeout(socket, SOCKET_TIMEOUT_MS);
+    if (set_socket_timeout(socket, SOCKET_TIMEOUT_MS) < 0) {
+        DBG_ERROR("Failed to set transfer timeout\n");
+        send_error(socket, addr, ERR_TIMEOUT);
+        close(current_fd);
+        current_fd = -1;
+        return;
+    }
 
     // Send initial ACKs
     send_ack(socket, addr, PKT_ACK);
@@ -191,6 +210,7 @@ void handle_backup(int socket, Packet *packet, struct sockaddr_ll *addr) {
         if (recv_size <= 0) {
             if (++timeout_count >= 3) {
                 DBG_ERROR("Transfer timeout after 3 attempts\n");
+                send_error(socket, addr, ERR_TIMEOUT);
                 break;
             }
             continue;
@@ -230,8 +250,6 @@ void handle_backup(int socket, Packet *packet, struct sockaddr_ll *addr) {
                     send_error(socket, addr, ERR_NO_SPACE);
                     break;
                 }
-
-                update_transfer_stats(&stats, written, packet->sequence);
                 expected_seq = (expected_seq + 1) & SEQ_MASK;
                 send_ack(socket, addr, PKT_OK);
 
@@ -264,6 +282,8 @@ void handle_backup(int socket, Packet *packet, struct sockaddr_ll *addr) {
         }
     }
     
+    // Reset timeout to default before returning
+    set_socket_timeout(socket, TIMEOUT_SEC * 1000);
     close(current_fd);
     current_fd = -1;
 }
@@ -277,6 +297,14 @@ void handle_restore(int socket, Packet *packet, struct sockaddr_ll *addr) {
     int fd = open(filepath, O_RDONLY);
     if (fd < 0) {
         send_error(socket, addr, ERR_NOT_FOUND);
+        return;
+    }
+    
+    // Set timeout for restore operation
+    if (set_socket_timeout(socket, SOCKET_TIMEOUT_MS) < 0) {
+        DBG_ERROR("Failed to set restore timeout\n");
+        send_error(socket, addr, ERR_TIMEOUT);
+        close(fd);
         return;
     }
     
@@ -297,6 +325,8 @@ void handle_restore(int socket, Packet *packet, struct sockaddr_ll *addr) {
         send_packet(socket, &data, addr);
     }
     
+    // Reset timeout before returning
+    set_socket_timeout(socket, TIMEOUT_SEC * 1000);
     current_state = STATE_IDLE;
     close(fd);
 }
@@ -337,3 +367,4 @@ void send_error(int socket, struct sockaddr_ll *addr, uint8_t error_code) {
     send_packet(socket, &error, addr);
 }
 
+// ==========================================================================================================

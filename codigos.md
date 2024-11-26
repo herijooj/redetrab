@@ -17,3 +17,9 @@
 1. Sem Acesso
 2. Sem Espaço
 3. Não Encontrado
+
+### Detalhes
+Não usar Bitfields.
+Timeout Obrigatório.
+CRC de 8 bits.
+Para e espera.

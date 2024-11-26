@@ -1,4 +1,6 @@
+// SOCKETC.C - Implementação das funções de comunicação via socket ========================================
 #include "sockets.h"
+#include "debug.h"
 #include <net/ethernet.h>
 #include <linux/if_packet.h>
 #include <net/if.h>
@@ -104,6 +106,34 @@ uint8_t calculate_crc(Packet *packet) {
     return crc;
 }
 
+int validate_packet(Packet *packet) {
+    // Check start marker
+    if (packet->start_marker != START_MARKER) {
+        DBG_WARN("Invalid start marker: 0x%02x\n", packet->start_marker);
+        return -1;
+    }
+    // Check protocol marker
+    if (packet->proto_marker != PROTO_MARKER) {
+        DBG_WARN("Invalid protocol marker: 0x%02x\n", packet->proto_marker);
+        return -1;
+    }
+    // Validate length field
+    size_t data_len = ntohs(packet->length) & LEN_MASK;
+    if (data_len > MAX_DATA_SIZE) {
+        DBG_WARN("Invalid length: %zu\n", data_len);
+        return -1;
+    }
+    // Verify CRC
+    uint8_t computed_crc = calculate_crc(packet);
+    if (packet->crc != computed_crc) {
+        DBG_WARN("CRC mismatch: computed=0x%02x, received=0x%02x\n", 
+                computed_crc, packet->crc);
+        debug_hex_dump("Packet dump: ", packet, sizeof(Packet));
+        return -1;
+    }
+    // Packet is valid
+    return 0;
+}
 
 int send_packet(int socket, Packet *packet, struct sockaddr_ll *addr) {
     packet->start_marker = START_MARKER;
@@ -152,34 +182,13 @@ int receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr, int loc
             continue;
         }
         
-        if (packet->start_marker != START_MARKER) {
-            DBG_WARN("Invalid start marker: 0x%02x\n", packet->start_marker);
-            continue;
-        }
-        
-        if (packet->proto_marker != PROTO_MARKER) {
-            DBG_WARN("Invalid protocol marker: 0x%02x\n", packet->proto_marker);
-            continue;
-        }
-
-        // Validate length field
-        size_t data_len = ntohs(packet->length) & LEN_MASK; // Updated
-        if (data_len > MAX_DATA_SIZE) {
-            DBG_WARN("Invalid length: %zu\n", data_len);
-            continue;
-        }
-
-        // CRC validation with detailed error
-        uint8_t computed_crc = calculate_crc(packet);
-        if (packet->crc != computed_crc) {
-            DBG_WARN("CRC mismatch: computed=0x%02x, received=0x%02x\n", 
-                    computed_crc, packet->crc);
-            debug_hex_dump("Packet dump: ", packet, sizeof(struct Packet));
-            continue;
+        if (validate_packet(packet) != 0) {
+            // Invalid packet, discard and continue
+            return -1;
         }
 
         // Update packet.length to be in host byte order
-        packet->length = data_len; // Added line
+        packet->length = ntohs(packet->length) & LEN_MASK;
 
         debug_packet("RX", packet);
         return received;
@@ -190,22 +199,24 @@ int receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr, int loc
 // Modify the wait_for_ack function to accept local_node_type
 int wait_for_ack(int socket, Packet *packet, struct sockaddr_ll *addr, uint8_t expected_type, int local_node_type) {
     int retries = 0;
+
     while (retries < MAX_RETRIES) {
         if (receive_packet(socket, packet, addr, local_node_type) > 0) {
-            if ((packet->type & 0x1F) == expected_type) {
+            if ((packet->type & TYPE_MASK) == expected_type) {
                 return 0;
             }
-            if ((packet->type & 0x1F) == PKT_NACK) {
+            if ((packet->type & TYPE_MASK) == PKT_NACK) {
                 DBG_WARN("Received NACK\n");
                 return -1;
             }
         }
         retries++;
-        DBG_WARN("No ACK received, retry %d/%d\n", retries, MAX_RETRIES);
+        DBG_WARN("Timeout waiting for ACK, retry %d/%d\n", retries, MAX_RETRIES);
         usleep(RETRY_DELAY_MS * 1000);
     }
     return -1;
 }
+
 
 // Remove send_ack and send_error functions as they're now in server.c
 // Delete these functions to avoid duplication
