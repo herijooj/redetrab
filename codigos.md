@@ -23,3 +23,6 @@ Não usar Bitfields.
 Timeout Obrigatório.
 CRC de 8 bits.
 Para e espera.
+
+| Marcador de Início | Tamanho | Seq    | Tipo   | Dados | CRC    |
+| 8 bits             | 6 bits  | 5 bits | 5 bits |  ---  | 8 bits |

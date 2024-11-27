@@ -307,9 +307,15 @@ void restore_file(int socket, char *filename, struct sockaddr_ll *addr, int node
                 close(fd);
                 return;
             case PKT_ERROR:
+                if (packet.data[0] == ERR_NOT_FOUND) {
+                    fprintf(stderr, "Error: File '%s' not found in server backup.\n", filename);
+                } else {
+                    fprintf(stderr, "Error: Received error code %d\n", packet.data[0]);
+                }
+                close(fd);
+                return;
             case PKT_NACK:
-                fprintf(stderr, packet.type == PKT_ERROR ? "Error: %d\n" : "Transfer failed\n",
-                        packet.type == PKT_ERROR ? packet.data[0] : 0);
+                fprintf(stderr, "Transfer failed\n");
                 close(fd);
                 return;
         }
