@@ -1,4 +1,3 @@
-// debug.h
 #ifndef DEBUG_H
 #define DEBUG_H
 
@@ -29,7 +28,7 @@ struct TransferStats {
     size_t total_received;
     size_t packets_processed;
     uint8_t last_sequence;
-    uint8_t expected_seq;  // Add this line
+    uint8_t expected_seq;
     int had_errors;
 };
 
@@ -57,7 +56,7 @@ void debug_hex_dump(const char *prefix, const void *data, size_t size);
 void debug_packet(const char *prefix, const struct Packet *packet);
 void print_transfer_summary(const struct TransferStats *stats);
 
-// Rename transfer-related function declarations
+// Transfer-related functions
 void transfer_init_stats(struct TransferStats *stats, size_t expected_size);
 void transfer_update_stats(struct TransferStats *stats, size_t bytes, uint8_t seq);
 
