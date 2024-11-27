@@ -146,6 +146,16 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
     size_t total_size = st.st_size;
     DBG_INFO("File size: %ld bytes\n", (long)total_size);
 
+    // Check if file size exceeds maximum possible size with current packet structure
+    size_t max_possible_size = (MAX_DATA_SIZE * (SEQ_MASK + 1));
+    if (total_size > max_possible_size) {
+        DBG_ERROR("File too large: %zu bytes. Maximum supported size is %zu bytes\n", 
+                  total_size, max_possible_size);
+        fprintf(stderr, "Error: File exceeds maximum supported size\n");
+        close(fd);
+        return;
+    }
+
     struct TransferStats stats;
     transfer_init_stats(&stats, total_size);
     size_t total_chunks = (total_size + MAX_DATA_SIZE - 1) / MAX_DATA_SIZE;
@@ -180,10 +190,16 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
 
     // Transfer file data
     char buffer[MAX_DATA_SIZE];
-    uint8_t seq = 0;
+    uint16_t seq = 0;  // Changed to uint16_t
 
     while (stats.total_received < total_size) {
-        ssize_t bytes = read(fd, buffer, MAX_DATA_SIZE);
+        // Limit read size to MAX_DATA_SIZE
+        size_t to_read = total_size - stats.total_received;
+        if (to_read > MAX_DATA_SIZE) {
+            to_read = MAX_DATA_SIZE;
+        }
+        
+        ssize_t bytes = read(fd, buffer, to_read);
         if (bytes <= 0) {
             DBG_ERROR("Read error: %s\n", strerror(errno));
 
@@ -213,6 +229,13 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
             return;
         }
 
+        // Ensure sequence number doesn't overflow
+        if (seq > SEQ_MASK) {
+            DBG_ERROR("Sequence number overflow\n");
+            close(fd);
+            return;
+        }
+
         size_t remaining = total_size - stats.total_received;
         DBG_INFO("Preparing chunk: seq=%d, size=%zd, remaining=%zu\n",
                  seq, bytes, remaining);
@@ -222,14 +245,20 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
 
         while (retries < MAX_RETRIES && !chunk_sent) {
             packet.type = PKT_DATA;
-            packet.sequence = seq;
-            packet.length = bytes;
+            packet.sequence = seq & SEQ_MASK;
+            packet.length = bytes & LEN_MASK;
             memcpy(packet.data, buffer, bytes);
+
+            if (bytes > LEN_MASK) {
+                DBG_ERROR("Data chunk too large: %zd bytes (max %d)\n", bytes, LEN_MASK);
+                close(fd);
+                return;
+            }
 
             if (send_packet(socket, &packet, addr) >= 0) {
                 if (wait_for_ack(socket, &packet, addr, PKT_OK) == 0) {
                     transfer_update_stats(&stats, bytes, seq);
-                    seq = (seq + 1) & SEQ_MASK;
+                    seq = (seq + 1) & SEQ_MASK;  // Correctly increment and wrap seq
                     chunk_sent = true;
 
                     float progress = (float)stats.total_received / total_size * 100;
@@ -404,4 +433,22 @@ void verify_file(int socket, char *filename, struct sockaddr_ll *addr) {
     } else {
         fprintf(stderr, "No response from server\n");
     }
+}
+
+void send_ack(int socket, struct sockaddr_ll *addr, uint8_t type) {
+    Packet ack = {0};
+    ack.start_marker = START_MARKER;
+    ack.type = type;
+    ack.sequence = 0;
+    ack.length = 0;
+    send_packet(socket, &ack, addr);
+}
+
+void send_error(int socket, struct sockaddr_ll *addr, uint8_t error_code) {
+    Packet error = {0};
+    error.start_marker = START_MARKER;
+    error.type = PKT_ERROR;
+    error.data[0] = error_code;
+    error.length = 1;
+    send_packet(socket, &error, addr);
 }

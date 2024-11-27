@@ -151,6 +151,21 @@ int main(int argc, char *argv[]) {
 void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *addr, struct TransferStats *stats) {
     size_t data_len = packet->length & LEN_MASK;
 
+    // Validate length field
+    if (data_len > MAX_DATA_SIZE) {
+        DBG_ERROR("Invalid packet length: %zu (max %d)\n", data_len, MAX_DATA_SIZE);
+        send_error(socket, addr, ERR_SEQUENCE);
+        return;
+    }
+
+    // Validate sequence number
+    if ((packet->sequence & SEQ_MASK) > SEQ_MASK) {
+        DBG_ERROR("Invalid sequence number: %d (max %d)\n", 
+                  packet->sequence & SEQ_MASK, SEQ_MASK);
+        send_error(socket, addr, ERR_SEQUENCE);
+        return;
+    }
+
     if (stats->total_received + data_len > stats->total_expected) {
         DBG_ERROR("Received more data than expected!\n");
         send_error(socket, addr, ERR_SEQUENCE);
@@ -180,7 +195,7 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
     stats->total_received += written;
     stats->packets_processed++;
     stats->last_sequence = packet->sequence & SEQ_MASK;
-    stats->expected_seq = (stats->expected_seq + 1) & SEQ_MASK;
+    stats->expected_seq = (stats->expected_seq + 1) & SEQ_MASK;  // Correctly increment and wrap expected_seq
 
     DBG_INFO("Updated stats - received: %zu/%zu bytes, packets: %zu\n",
              stats->total_received, stats->total_expected, stats->packets_processed);
@@ -285,9 +300,11 @@ void handle_restore(int socket, Packet *packet, struct sockaddr_ll *addr) {
 
     char buffer[MAX_DATA_SIZE];
     ssize_t bytes;
-    uint8_t seq = 0;
+    uint16_t seq = 0;  // Changed to uint16_t
 
     current_state = STATE_RECEIVING;
+
+    size_t bytes_sent = 0;  // Initialize bytes sent
 
     while ((bytes = read(fd, buffer, MAX_DATA_SIZE)) > 0) {
         Packet data = {0};
@@ -297,13 +314,20 @@ void handle_restore(int socket, Packet *packet, struct sockaddr_ll *addr) {
         data.length = bytes & LEN_MASK;
         memcpy(data.data, buffer, bytes);
 
+        size_t remaining = total_size - bytes_sent - bytes;  // Calculate remaining bytes
+
+        DBG_INFO("Preparing chunk: seq=%d, size=%zd, remaining=%zu\n",
+                 data.sequence & SEQ_MASK, bytes, remaining);  // Log the chunk details
+
         DBG_INFO("Sending restore chunk: %zd bytes\n", bytes);
         send_packet(socket, &data, addr);
+
+        bytes_sent += bytes;  // Update bytes sent
 
         // Wait for ACK from client
         Packet recv_packet;
         if (receive_packet(socket, &recv_packet, addr) > 0) {
-            if (recv_packet.type != PKT_OK || recv_packet.sequence != data.sequence) {
+            if (recv_packet.type != PKT_OK || ((recv_packet.sequence & SEQ_MASK) != (seq - 1))) {
                 DBG_WARN("Did not receive expected ACK\n");
             }
         } else {
