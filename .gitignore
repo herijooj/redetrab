@@ -56,3 +56,5 @@ dkms.conf
 backup/
 client
 server
+concat.sh
+CHANGES.MD
