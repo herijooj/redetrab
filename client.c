@@ -112,10 +112,27 @@ int main(int argc, char *argv[]) {
 void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
     DBG_INFO("Starting backup of %s\n", filename);
 
-    int fd = open(filename, O_RDONLY);
+    // Validate file path
+    char resolved_path[PATH_MAX];
+    if (realpath(filename, resolved_path) == NULL) {
+        DBG_ERROR("Cannot resolve file path %s: %s\n", filename, strerror(errno));
+        fprintf(stderr, "Error: Invalid file path '%s': %s\n", filename, strerror(errno));
+        return;
+    }
+
+    // Get just the filename for the packet
+    char *base_filename = strrchr(resolved_path, '/');
+    if (base_filename) {
+        base_filename++; // Skip the '/'
+    } else {
+        base_filename = resolved_path;
+    }
+
+    // Open the file using the full resolved path
+    int fd = open(resolved_path, O_RDONLY);
     if (fd < 0) {
-        DBG_ERROR("Cannot open file %s: %s\n", filename, strerror(errno));
-        fprintf(stderr, "Error: Cannot open file '%s' for reading: %s\n", filename, strerror(errno));
+        DBG_ERROR("Cannot open file %s: %s\n", resolved_path, strerror(errno));
+        fprintf(stderr, "Error: Cannot open file '%s' for reading: %s\n", resolved_path, strerror(errno));
         return;
     }
 
@@ -140,9 +157,18 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
     packet.type = PKT_BACKUP;
 
     // Pack filename and size
-    strncpy(packet.data, filename, MAX_DATA_SIZE - sizeof(size_t) - 1);
-    *((size_t *)(packet.data + strlen(filename) + 1)) = total_size;
-    packet.length = strlen(filename) + 1 + sizeof(size_t);
+    size_t max_filename_len = MAX_DATA_SIZE - sizeof(size_t) - 1;
+    if (strlen(base_filename) >= max_filename_len) {
+        DBG_ERROR("Filename too long (max %zu chars): %s\n", max_filename_len - 1, base_filename);
+        fprintf(stderr, ANSI_COLOR_RED "Error: Filename exceeds maximum length\n" ANSI_COLOR_RESET);
+        close(fd);
+        return;
+    }
+    
+    memset(packet.data, 0, MAX_DATA_SIZE);
+    memcpy(packet.data, base_filename, strlen(base_filename));
+    *((size_t *)(packet.data + strlen(base_filename) + 1)) = total_size;
+    packet.length = strlen(base_filename) + 1 + sizeof(size_t);
 
     if (send_packet(socket, &packet, addr) < 0 ||
         wait_for_ack(socket, &packet, addr, PKT_ACK) != 0 ||
@@ -271,78 +297,91 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
     packet.length = strlen(packet.data);
     send_packet(socket, &packet, addr);
 
-    // Receive the file size from the server
-    if (receive_packet(socket, &packet, addr) > 0 && packet.type == PKT_SIZE) {  // Changed from PKT_FILE_SIZE to PKT_SIZE
-        size_t total_size = *((size_t *)packet.data);
-        DBG_INFO("File size to restore: %zu bytes\n", total_size);
-
-        struct TransferStats stats;
-        transfer_init_stats(&stats, total_size);
-
-        int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd < 0) {
-            DBG_ERROR("Cannot create file %s: %s\n", filename, strerror(errno));
-            return 1; // Return non-zero on error
-        }
-
-        while (stats.total_received < total_size) {
-            if (receive_packet(socket, &packet, addr) <= 0) {
-                fprintf(stderr, "No response from server\n");
-                close(fd);
-                return 1;
+    // Receive response from server
+    if (receive_packet(socket, &packet, addr) > 0) {
+        // First check for error response
+        if ((packet.type & TYPE_MASK) == PKT_ERROR) {
+            if (packet.data[0] == ERR_NOT_FOUND) {
+                fprintf(stderr, ANSI_COLOR_RED "Error: File '%s' not found in backup\n" ANSI_COLOR_RESET, filename);
+            } else {
+                fprintf(stderr, ANSI_COLOR_RED "Error: Server returned error code %d\n" ANSI_COLOR_RESET, packet.data[0]);
             }
-            debug_packet("RX", &packet);
-            switch (packet.type & TYPE_MASK) {
-                case PKT_DATA:
-                    if (write(fd, packet.data, packet.length & LEN_MASK) < 0) {
-                        fprintf(stderr, "Write error\n");
+            return 1;
+        }
+        
+        // If not an error, proceed with size packet check
+        if (packet.type == PKT_SIZE) {
+            size_t total_size = *((size_t *)packet.data);
+            DBG_INFO("File size to restore: %zu bytes\n", total_size);
+
+            struct TransferStats stats;
+            transfer_init_stats(&stats, total_size);
+
+            int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd < 0) {
+                DBG_ERROR("Cannot create file %s: %s\n", filename, strerror(errno));
+                return 1; // Return non-zero on error
+            }
+
+            while (stats.total_received < total_size) {
+                if (receive_packet(socket, &packet, addr) <= 0) {
+                    fprintf(stderr, "No response from server\n");
+                    close(fd);
+                    return 1;
+                }
+                debug_packet("RX", &packet);
+                switch (packet.type & TYPE_MASK) {
+                    case PKT_DATA:
+                        if (write(fd, packet.data, packet.length & LEN_MASK) < 0) {
+                            fprintf(stderr, "Write error\n");
+                            close(fd);
+                            return 1; // Return error code
+                        }
+                        transfer_update_stats(&stats, packet.length & LEN_MASK, packet.sequence);
+
+                        float progress = (float)stats.total_received / total_size * 100;
+                        DBG_INFO("Progress: %.1f%% (%zu/%zu bytes)\n",
+                                 progress, stats.total_received, total_size);
+
+                        // Send ACK for the received packet
+                        Packet ack = {0};
+                        ack.start_marker = START_MARKER;
+                        ack.type = PKT_OK;
+                        ack.sequence = packet.sequence & SEQ_MASK;
+                        send_packet(socket, &ack, addr);
+                        break;
+                    case PKT_END_TX:
+                        packet.type = PKT_OK_CHSUM;
+                        send_packet(socket, &packet, addr);
+                        print_transfer_summary(&stats);
+                        DBG_INFO("Transfer completed successfully\n");
+                        close(fd);
+                        return 0; // Return 0 on success
+                    case PKT_ERROR:
+                        if (packet.data[0] == ERR_NOT_FOUND) {
+                            fprintf(stderr, "Error: File '%s' not found in server backup.\n", filename);
+                        } else {
+                            fprintf(stderr, "Error: Received error code %d\n", packet.data[0]);
+                        }
                         close(fd);
                         return 1; // Return error code
-                    }
-                    transfer_update_stats(&stats, packet.length & LEN_MASK, packet.sequence);
-
-                    float progress = (float)stats.total_received / total_size * 100;
-                    DBG_INFO("Progress: %.1f%% (%zu/%zu bytes)\n",
-                             progress, stats.total_received, total_size);
-
-                    // Send ACK for the received packet
-                    Packet ack = {0};
-                    ack.start_marker = START_MARKER;
-                    ack.type = PKT_OK;
-                    ack.sequence = packet.sequence & SEQ_MASK;
-                    send_packet(socket, &ack, addr);
-                    break;
-                case PKT_END_TX:
-                    packet.type = PKT_OK_CHSUM;
-                    send_packet(socket, &packet, addr);
-                    print_transfer_summary(&stats);
-                    DBG_INFO("Transfer completed successfully\n");
-                    close(fd);
-                    return 0; // Return 0 on success
-                case PKT_ERROR:
-                    if (packet.data[0] == ERR_NOT_FOUND) {
-                        fprintf(stderr, "Error: File '%s' not found in server backup.\n", filename);
-                    } else {
-                        fprintf(stderr, "Error: Received error code %d\n", packet.data[0]);
-                    }
-                    close(fd);
-                    return 1; // Return error code
-                case PKT_NACK:
-                    fprintf(stderr, "Transfer failed\n");
-                    close(fd);
-                    return 1; // Return error code
+                    case PKT_NACK:
+                        fprintf(stderr, "Transfer failed\n");
+                        close(fd);
+                        return 1; // Return error code
+                }
             }
-        }
 
-        // If the transfer completes without receiving END_TX
-        print_transfer_summary(&stats);
-        DBG_INFO("Transfer completed successfully\n");
-        close(fd);
-        return 0;
-    } else {
-        fprintf(stderr, "Failed to receive file size from server\n");
-        return 1;
+            // If the transfer completes without receiving END_TX
+            print_transfer_summary(&stats);
+            DBG_INFO("Transfer completed successfully\n");
+            close(fd);
+            return 0;
+        }
     }
+
+    fprintf(stderr, ANSI_COLOR_RED "Error: No valid response from server\n" ANSI_COLOR_RESET);
+    return 1;
 }
 
 void verify_file(int socket, char *filename, struct sockaddr_ll *addr) {

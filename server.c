@@ -200,6 +200,15 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
 void handle_backup(int socket, Packet *packet, struct sockaddr_ll *addr, struct TransferStats *stats) {
     // Extract file size and filename
     char *filename = packet->data;
+    
+    // Get just the base filename without path
+    char *base_filename = strrchr(filename, '/');
+    if (base_filename) {
+        base_filename++; // Skip the '/'
+    } else {
+        base_filename = filename; // No path separator found
+    }
+    
     size_t file_size = *((size_t *)(packet->data + strlen(packet->data) + 1));
 
     // Initialize stats with expected size
@@ -213,7 +222,7 @@ void handle_backup(int socket, Packet *packet, struct sockaddr_ll *addr, struct 
     DBG_INFO("Starting backup: file=%s, expected_size=%zu\n", filename, file_size);
 
     char filepath[PATH_MAX];
-    snprintf(filepath, sizeof(filepath), "%s%s", BACKUP_DIR, filename);
+    snprintf(filepath, sizeof(filepath), "%s%s", BACKUP_DIR, base_filename);
 
     int fd = open(filepath, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0) {
@@ -244,6 +253,7 @@ void handle_restore(int socket, Packet *packet, struct sockaddr_ll *addr) {
 
     int fd = open(filepath, O_RDONLY);
     if (fd < 0) {
+        DBG_WARN("File not found in backup: %s\n", packet->data);
         send_error(socket, addr, ERR_NOT_FOUND);
         return;
     }
