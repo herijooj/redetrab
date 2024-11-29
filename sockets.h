@@ -23,7 +23,7 @@
 
 // Masks
 #define TYPE_MASK 0x1F  // 5 bits
-#define SEQ_MASK 0x1F   // 5 bits
+#define SEQ_MASK 0xFFFF // 16 bits
 #define LEN_MASK 0x3F   // 6 bits
 
 // Packet types
@@ -54,11 +54,18 @@
 #define MAX_RETRIES 5
 #define RETRY_DELAY_MS 500      // 500 milliseconds
 
+// Sequence number comparison macros
+#define SEQ_DIFF(a, b) ((uint16_t)((a) - (b)) & SEQ_MASK)
+#define SEQ_LT(a, b)   (SEQ_DIFF(a, b) > (SEQ_MASK/2))
+#define SEQ_GT(a, b)   (SEQ_DIFF(b, a) > (SEQ_MASK/2))
+#define SEQ_LEQ(a, b)  (!SEQ_GT(a, b))
+#define SEQ_GEQ(a, b)  (!SEQ_LT(a, b))
+
 #pragma pack(push, 1)
 struct Packet {
     uint8_t start_marker;   // 8 bits
     uint8_t length;         // 6 bits (masked)
-    uint8_t sequence;       // 5 bits (masked)
+    uint16_t sequence;      // Changed from uint8_t to uint16_t
     uint8_t type;           // 5 bits (masked)
     char data[MAX_DATA_SIZE];
     uint8_t crc;            // 8 bits
@@ -80,10 +87,10 @@ int cria_raw_socket(char *nome_interface_rede);
 int validate_packet(Packet *packet);
 
 struct PacketStats {
-    size_t total_bytes;
-    size_t packets_sent;
-    size_t packets_received;
-    size_t retries;
+    uint64_t total_bytes;       // Changed from size_t
+    uint64_t packets_sent;      // Changed from size_t
+    uint64_t packets_received;  // Changed from size_t
+    uint64_t retries;           // Changed from size_t
 };
 
 void init_packet_stats(struct PacketStats *stats);

@@ -85,7 +85,8 @@ uint8_t calculate_crc(Packet *packet) {
     uint8_t crc = 0;
     crc ^= packet->start_marker;
     crc ^= packet->length & LEN_MASK;
-    crc ^= packet->sequence & SEQ_MASK;
+    crc ^= (packet->sequence >> 8) & 0xFF;  // Include high byte
+    crc ^= packet->sequence & 0xFF;         // Include low byte
     crc ^= packet->type & TYPE_MASK;
     for (int i = 0; i < (packet->length & LEN_MASK); i++) {
         crc ^= packet->data[i];

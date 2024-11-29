@@ -143,18 +143,8 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
         return;
     }
 
-    size_t total_size = st.st_size;
-    DBG_INFO("File size: %ld bytes\n", (long)total_size);
-
-    // Check if file size exceeds maximum possible size with current packet structure
-    size_t max_possible_size = (MAX_DATA_SIZE * (SEQ_MASK + 1));
-    if (total_size > max_possible_size) {
-        DBG_ERROR("File too large: %zu bytes. Maximum supported size is %zu bytes\n", 
-                  total_size, max_possible_size);
-        fprintf(stderr, "Error: File exceeds maximum supported size\n");
-        close(fd);
-        return;
-    }
+    uint64_t total_size = st.st_size;  // Changed from size_t
+    DBG_INFO("File size: %lu bytes\n", total_size);
 
     struct TransferStats stats;
     transfer_init_stats(&stats, total_size);
@@ -190,11 +180,11 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
 
     // Transfer file data
     char buffer[MAX_DATA_SIZE];
-    uint16_t seq = 0;  // Changed to uint16_t
+    uint16_t seq = 0;  // Use uint16_t for sequence numbers
 
     while (stats.total_received < total_size) {
         // Limit read size to MAX_DATA_SIZE
-        size_t to_read = total_size - stats.total_received;
+        uint64_t to_read = total_size - stats.total_received;  // Changed from size_t
         if (to_read > MAX_DATA_SIZE) {
             to_read = MAX_DATA_SIZE;
         }
@@ -243,29 +233,31 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
         int retries = 0;
         bool chunk_sent = false;
 
+        uint16_t current_seq = seq & SEQ_MASK;
+        
         while (retries < MAX_RETRIES && !chunk_sent) {
             packet.type = PKT_DATA;
-            packet.sequence = seq & SEQ_MASK;
+            packet.sequence = current_seq;
             packet.length = bytes & LEN_MASK;
             memcpy(packet.data, buffer, bytes);
 
-            if (bytes > LEN_MASK) {
-                DBG_ERROR("Data chunk too large: %zd bytes (max %d)\n", bytes, LEN_MASK);
-                close(fd);
-                return;
-            }
-
             if (send_packet(socket, &packet, addr) >= 0) {
                 if (wait_for_ack(socket, &packet, addr, PKT_OK) == 0) {
-                    transfer_update_stats(&stats, bytes, seq);
-                    seq = (seq + 1) & SEQ_MASK;  // Correctly increment and wrap seq
-                    chunk_sent = true;
-
-                    float progress = (float)stats.total_received / total_size * 100;
-                    DBG_INFO("Progress: %.1f%% (%zu/%zu bytes)\n",
-                             progress, stats.total_received, total_size);
-                } else {
-                    DBG_WARN("No ACK received for seq %d\n", seq);
+                    if (SEQ_DIFF(packet.sequence & SEQ_MASK, current_seq) == 0) {
+                        transfer_update_stats(&stats, bytes, current_seq);
+                        seq = (current_seq + 1) & SEQ_MASK;
+                        
+                        // Handle wrap-around
+                        if (seq == 0) {
+                            transfer_handle_wrap(&stats);
+                        }
+                        
+                        chunk_sent = true;
+                        float progress = (float)(stats.total_received * 100.0) / total_size;
+                        DBG_INFO("Progress: %.1f%% (%lu/%lu bytes, seq: %u, wraps: %u)\n",
+                                progress, stats.total_received, total_size,
+                                current_seq, stats.wrap_count);
+                    }
                 }
             }
 
@@ -340,8 +332,8 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
         
         // If not an error, proceed with size packet check
         if (packet.type == PKT_SIZE) {
-            size_t total_size = *((size_t *)packet.data);
-            DBG_INFO("File size to restore: %zu bytes\n", total_size);
+            uint64_t total_size = *((uint64_t *)packet.data);  // Changed from size_t
+            DBG_INFO("File size to restore: %lu bytes\n", total_size);
 
             struct TransferStats stats;
             transfer_init_stats(&stats, total_size);
@@ -352,6 +344,8 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
                 return 1; // Return non-zero on error
             }
 
+            uint16_t expected_seq = 0;  // Use uint16_t for sequence numbers
+
             while (stats.total_received < total_size) {
                 if (receive_packet(socket, &packet, addr) <= 0) {
                     fprintf(stderr, "No response from server\n");
@@ -361,15 +355,25 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
                 debug_packet("RX", &packet);
                 switch (packet.type & TYPE_MASK) {
                     case PKT_DATA:
+                        uint16_t recv_seq = packet.sequence & SEQ_MASK;
+                        if (SEQ_DIFF(recv_seq, expected_seq) != 0) {
+                            fprintf(stderr, "Sequence mismatch: expected %d, got %d\n",
+                                    expected_seq, recv_seq);
+                            close(fd);
+                            return 1;
+                        }
+
                         if (write(fd, packet.data, packet.length & LEN_MASK) < 0) {
                             fprintf(stderr, "Write error\n");
                             close(fd);
                             return 1; // Return error code
                         }
-                        transfer_update_stats(&stats, packet.length & LEN_MASK, packet.sequence);
 
-                        float progress = (float)stats.total_received / total_size * 100;
-                        DBG_INFO("Progress: %.1f%% (%zu/%zu bytes)\n",
+                        expected_seq = (recv_seq + 1) & SEQ_MASK;
+                        transfer_update_stats(&stats, packet.length & LEN_MASK, recv_seq);
+
+                        float progress = (float)(stats.total_received * 100.0) / total_size;
+                        DBG_INFO("Progress: %.1f%% (%lu/%lu bytes)\n",
                                  progress, stats.total_received, total_size);
 
                         // Send ACK for the received packet

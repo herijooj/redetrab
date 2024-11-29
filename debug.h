@@ -24,11 +24,13 @@ enum {
 // Forward declarations
 struct Packet;
 struct TransferStats {
-    size_t total_expected;
-    size_t total_received;
-    size_t packets_processed;
-    uint8_t last_sequence;
-    uint8_t expected_seq;
+    uint64_t total_expected;    
+    uint64_t total_received;    
+    uint64_t packets_processed; 
+    uint16_t last_sequence;     
+    uint16_t expected_seq;      
+    uint32_t wrap_count;        // Track number of sequence wraps
+    uint64_t total_sequences;   // Track total sequence count across wraps
     int had_errors;
 };
 
@@ -58,6 +60,7 @@ void print_transfer_summary(const struct TransferStats *stats);
 
 // Transfer-related functions
 void transfer_init_stats(struct TransferStats *stats, size_t expected_size);
-void transfer_update_stats(struct TransferStats *stats, size_t bytes, uint8_t seq);
+void transfer_update_stats(struct TransferStats *stats, size_t bytes, uint16_t seq);
+void transfer_handle_wrap(struct TransferStats *stats);
 
 #endif // DEBUG_H

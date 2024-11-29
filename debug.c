@@ -63,7 +63,7 @@ void debug_packet(const char *prefix, const struct Packet *packet) {
         default:            type_str = "UNKNOWN"; break;
     }
 
-    DBG_INFO("%s: type=%s seq=%d len=%d\n",
+    DBG_INFO("%s: type=%s seq=%u len=%u\n",
              prefix, type_str, packet->sequence & SEQ_MASK, packet->length & LEN_MASK);
     if (debug_level >= DBG_LEVEL_TRACE) {
         debug_hex_dump("  ", packet->data, packet->length & LEN_MASK);
@@ -75,18 +75,23 @@ void transfer_init_stats(struct TransferStats *stats, size_t expected_size) {
     stats->total_expected = expected_size;
 }
 
-void transfer_update_stats(struct TransferStats *stats, size_t bytes, uint8_t seq) {
+void transfer_handle_wrap(struct TransferStats *stats) {
+    stats->wrap_count++;
+    stats->total_sequences = (uint64_t)stats->wrap_count * (SEQ_MASK + 1) + stats->last_sequence;
+    DBG_INFO("Sequence wrapped around (count: %u, total sequences: %lu)\n", 
+             stats->wrap_count, stats->total_sequences);
+}
+
+void transfer_update_stats(struct TransferStats *stats, size_t bytes, uint16_t seq) {
     stats->total_received += bytes;
     stats->packets_processed++;
-
-    // Check for sequence gaps
-    if (stats->packets_processed > 1 &&
-        ((seq & SEQ_MASK) != ((stats->last_sequence + 1) & SEQ_MASK))) {
-        DBG_WARN("Sequence gap detected: last=%u, current=%u\n",
-                 stats->last_sequence, seq & SEQ_MASK);
-        stats->had_errors = 1;
+    
+    // Check for wrap-around
+    if (seq < stats->last_sequence) {
+        transfer_handle_wrap(stats);
     }
-    stats->last_sequence = seq & SEQ_MASK;
+    
+    stats->last_sequence = seq;
 }
 
 void print_transfer_summary(const struct TransferStats *stats) {

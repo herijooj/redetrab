@@ -167,7 +167,8 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
     }
 
     if (stats->total_received + data_len > stats->total_expected) {
-        DBG_ERROR("Received more data than expected!\n");
+        DBG_ERROR("Received more data than expected! (%lu + %zu > %lu)\n",
+                  stats->total_received, data_len, stats->total_expected);
         send_error(socket, addr, ERR_SEQUENCE);
         return;
     }
@@ -176,12 +177,20 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
              packet->sequence & SEQ_MASK, stats->expected_seq,
              data_len, stats->total_received, stats->total_expected);
 
-    if ((packet->sequence & SEQ_MASK) != stats->expected_seq) {
-        DBG_ERROR("Sequence mismatch: expected %d, got %d\n",
-                  stats->expected_seq, packet->sequence & SEQ_MASK);
-        stats->had_errors = 1;
-        send_error(socket, addr, ERR_SEQUENCE);
-        return;
+    uint16_t recv_seq = packet->sequence & SEQ_MASK;
+    uint16_t exp_seq = stats->expected_seq & SEQ_MASK;
+
+    // Handle wrap-around in sequence numbers
+    if (recv_seq != exp_seq) {
+        if (recv_seq == 0 && exp_seq == SEQ_MASK) {
+            transfer_handle_wrap(stats);
+        } else {
+            DBG_ERROR("Sequence mismatch: expected %d, got %d (wrap count: %u)\n",
+                      exp_seq, recv_seq, stats->wrap_count);
+            stats->had_errors = 1;
+            send_error(socket, addr, ERR_SEQUENCE);
+            return;
+        }
     }
 
     ssize_t written = write(fd, packet->data, data_len);
@@ -194,14 +203,14 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
 
     stats->total_received += written;
     stats->packets_processed++;
-    stats->last_sequence = packet->sequence & SEQ_MASK;
-    stats->expected_seq = (stats->expected_seq + 1) & SEQ_MASK;  // Correctly increment and wrap expected_seq
+    stats->last_sequence = recv_seq;
+    stats->expected_seq = (recv_seq + 1) & SEQ_MASK;
 
     DBG_INFO("Updated stats - received: %zu/%zu bytes, packets: %zu\n",
              stats->total_received, stats->total_expected, stats->packets_processed);
 
-    float progress = (float)stats->total_received / stats->total_expected * 100;
-    DBG_INFO("Progress: %.1f%% (%zu/%zu bytes)\n",
+    float progress = (float)(stats->total_received * 100.0) / stats->total_expected;
+    DBG_INFO("Progress: %.1f%% (%lu/%lu bytes)\n",
              progress, stats->total_received, stats->total_expected);
 
     // Send acknowledgment
@@ -232,6 +241,8 @@ void handle_backup(int socket, Packet *packet, struct sockaddr_ll *addr, struct 
     stats->total_received = 0;
     stats->packets_processed = 0;
     stats->expected_seq = 0;
+    stats->wrap_count = 0;
+    stats->total_sequences = 0;
     stats->had_errors = 0;
 
     DBG_INFO("Starting backup: file=%s, expected_size=%zu\n", filename, file_size);
@@ -281,8 +292,8 @@ void handle_restore(int socket, Packet *packet, struct sockaddr_ll *addr) {
         close(fd);
         return;
     }
-    size_t total_size = st.st_size;
-    DBG_INFO("File size: %zu bytes\n", total_size);
+    uint64_t total_size = st.st_size;  // Changed from size_t
+    DBG_INFO("File size: %lu bytes\n", total_size);
 
     Packet size_packet = {0};
     size_packet.start_marker = START_MARKER;
@@ -300,7 +311,7 @@ void handle_restore(int socket, Packet *packet, struct sockaddr_ll *addr) {
 
     char buffer[MAX_DATA_SIZE];
     ssize_t bytes;
-    uint16_t seq = 0;  // Changed to uint16_t
+    uint16_t seq = 0;  // Use uint16_t for sequence numbers
 
     current_state = STATE_RECEIVING;
 
@@ -310,7 +321,8 @@ void handle_restore(int socket, Packet *packet, struct sockaddr_ll *addr) {
         Packet data = {0};
         data.start_marker = START_MARKER;
         data.type = PKT_DATA;
-        data.sequence = seq++;
+        data.sequence = seq & SEQ_MASK;
+        seq = (seq + 1) & SEQ_MASK;
         data.length = bytes & LEN_MASK;
         memcpy(data.data, buffer, bytes);
 
