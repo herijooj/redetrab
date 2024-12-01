@@ -5,28 +5,22 @@
 #include <stdbool.h>
 #include <ctype.h>
 
-#define ANSI_COLOR_RED     "\x1b[31m"
-#define ANSI_COLOR_GREEN   "\x1b[32m"
-#define ANSI_COLOR_YELLOW  "\x1b[33m"
-#define ANSI_COLOR_BLUE    "\x1b[34m"
-#define ANSI_COLOR_RESET   "\x1b[0m"
-
 void backup_file(int socket, char *filename, struct sockaddr_ll *addr);
 int restore_file(int socket, char *filename, struct sockaddr_ll *addr);
 void verify_file(int socket, char *filename, struct sockaddr_ll *addr);
 
 void display_help(const char* program_name) {
-    printf(ANSI_COLOR_BLUE "NARBS Client (Not A Real Backup Solution)\n" ANSI_COLOR_RESET);
+    printf(BLUE "NARBS Client (Not A Real Backup Solution)\n" RESET);
 
-    printf(ANSI_COLOR_GREEN "Usage:\n" ANSI_COLOR_RESET);
+    printf(GREEN "Usage:\n" RESET);
     printf("  %s <interface> <command> <filename>\n\n", program_name);
 
-    printf(ANSI_COLOR_YELLOW "Commands:\n" ANSI_COLOR_RESET);
+    printf(YELLOW "Commands:\n" RESET);
     printf("  backup    - Create a backup of a file\n");
     printf("  restaura  - Restore a file from backup\n");
     printf("  verifica - Verify if a file exists in backup\n\n");
 
-    printf(ANSI_COLOR_YELLOW "Options:\n" ANSI_COLOR_RESET);
+    printf(YELLOW "Options:\n" RESET);
     printf("  -h        - Display this help message");
 }
 
@@ -62,51 +56,6 @@ int read_mac_from_config(const char *config_file, unsigned char *mac_addr) {
     }
     fclose(file);
     return -1;
-}
-
-int main(int argc, char *argv[]) {
-    debug_init();  // Initialize debug system
-
-    if (argc == 2 && strcmp(argv[1], "-h") == 0) {
-        display_help(argv[0]);
-        return 0;
-    }
-
-    if (argc != 4) {
-        fprintf(stderr, ANSI_COLOR_RED "Error: Invalid number of arguments\n" ANSI_COLOR_RESET);
-        fprintf(stderr, "Use '%s -h' for help\n", argv[0]);
-        exit(1);
-    }
-
-    int socket = cria_raw_socket(argv[1]);
-    struct sockaddr_ll addr;
-    if (get_interface_info(socket, argv[1], &addr) < 0) {
-        exit(1);
-    }
-
-    // Replace hardcoded MAC with config reading
-    unsigned char server_mac[ETH_ALEN];
-    if (read_mac_from_config("config.cfg", server_mac) != 0) {
-        fprintf(stderr, ANSI_COLOR_RED "Error: Failed to read MAC address from config file.\n" ANSI_COLOR_RESET);
-        exit(1);
-    }
-    memcpy(addr.sll_addr, server_mac, ETH_ALEN);
-
-    if (strcmp(argv[2], "backup") == 0) {
-        backup_file(socket, argv[3], &addr);
-    } else if (strcmp(argv[2], "restaura") == 0) {
-        if (restore_file(socket, argv[3], &addr) != 0) {
-            fprintf(stderr, "An error occurred during file restoration.\n");
-            exit(1); // Exit gracefully on error
-        }
-    } else if (strcmp(argv[2], "verifica") == 0) {
-        verify_file(socket, argv[3], &addr);
-    } else {
-        fprintf(stderr, "Invalid command\n");
-        exit(1);
-    }
-
-    return 0;
 }
 
 void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
@@ -160,7 +109,7 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
     size_t max_filename_len = MAX_DATA_SIZE - sizeof(size_t) - 1;
     if (strlen(base_filename) >= max_filename_len) {
         DBG_ERROR("Filename too long (max %zu chars): %s\n", max_filename_len - 1, base_filename);
-        fprintf(stderr, ANSI_COLOR_RED "Error: Filename exceeds maximum length\n" ANSI_COLOR_RESET);
+        fprintf(stderr, RED "Error: Filename exceeds maximum length\n" RESET);
         close(fd);
         return;
     }
@@ -323,9 +272,9 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
         // First check for error response
         if ((packet.type & TYPE_MASK) == PKT_ERROR) {
             if (packet.data[0] == ERR_NOT_FOUND) {
-                fprintf(stderr, ANSI_COLOR_RED "Error: File '%s' not found in backup\n" ANSI_COLOR_RESET, filename);
+                fprintf(stderr, RED "Error: File '%s' not found in backup\n" RESET, filename);
             } else {
-                fprintf(stderr, ANSI_COLOR_RED "Error: Server returned error code %d\n" ANSI_COLOR_RESET, packet.data[0]);
+                fprintf(stderr, RED "Error: Server returned error code %d\n" RESET, packet.data[0]);
             }
             return 1;
         }
@@ -413,7 +362,7 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
         }
     }
 
-    fprintf(stderr, ANSI_COLOR_RED "Error: No valid response from server\n" ANSI_COLOR_RESET);
+    fprintf(stderr, RED "Error: No valid response from server\n" RESET);
     return 1;
 }
 
@@ -439,20 +388,47 @@ void verify_file(int socket, char *filename, struct sockaddr_ll *addr) {
     }
 }
 
-void send_ack(int socket, struct sockaddr_ll *addr, uint8_t type) {
-    Packet ack = {0};
-    ack.start_marker = START_MARKER;
-    ack.type = type;
-    ack.sequence = 0;
-    ack.length = 0;
-    send_packet(socket, &ack, addr);
-}
+int main(int argc, char *argv[]) {
+    debug_init();  // Initialize debug system
 
-void send_error(int socket, struct sockaddr_ll *addr, uint8_t error_code) {
-    Packet error = {0};
-    error.start_marker = START_MARKER;
-    error.type = PKT_ERROR;
-    error.data[0] = error_code;
-    error.length = 1;
-    send_packet(socket, &error, addr);
+    if (argc == 2 && strcmp(argv[1], "-h") == 0) {
+        display_help(argv[0]);
+        return 0;
+    }
+
+    if (argc != 4) {
+        fprintf(stderr, RED "Error: Invalid number of arguments\n" RESET);
+        fprintf(stderr, "Use '%s -h' for help\n", argv[0]);
+        exit(1);
+    }
+
+    int socket = cria_raw_socket(argv[1]);
+    struct sockaddr_ll addr;
+    if (get_interface_info(socket, argv[1], &addr) < 0) {
+        exit(1);
+    }
+
+    // Replace hardcoded MAC with config reading
+    unsigned char server_mac[ETH_ALEN];
+    if (read_mac_from_config("config.cfg", server_mac) != 0) {
+        fprintf(stderr, RED "Error: Failed to read MAC address from config file.\n" RESET);
+        exit(1);
+    }
+    memcpy(addr.sll_addr, server_mac, ETH_ALEN);
+
+    if (strcmp(argv[2], "backup") == 0) {
+        backup_file(socket, argv[3], &addr);
+    } else if (strcmp(argv[2], "restaura") == 0) {
+        if (restore_file(socket, argv[3], &addr) != 0) {
+            fprintf(stderr, "An error occurred during file restoration.\n");
+            exit(1); // Exit gracefully on error
+        }
+    } else if (strcmp(argv[2], "verifica") == 0) {
+        verify_file(socket, argv[3], &addr);
+    } else {
+        fprintf(stderr, "Invalid command\n");
+        exit(1);
+    }
+
+    return 0;
 }

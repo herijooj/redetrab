@@ -9,143 +9,33 @@
 #define STATE_IDLE 0
 #define STATE_RECEIVING 1
 
-#define ANSI_COLOR_RED     "\x1b[31m"
-#define ANSI_COLOR_GREEN   "\x1b[32m"
-#define ANSI_COLOR_YELLOW  "\x1b[33m"
-#define ANSI_COLOR_BLUE    "\x1b[34m"
-#define ANSI_COLOR_RESET   "\x1b[0m"
-
 static int current_state = STATE_IDLE;
 static int current_fd = -1;
+
+void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *addr, struct TransferStats *stats);
 
 void handle_backup(int socket, Packet *packet, struct sockaddr_ll *addr, struct TransferStats *stats);
 void handle_restore(int socket, Packet *packet, struct sockaddr_ll *addr);
 void handle_verify(int socket, Packet *packet, struct sockaddr_ll *addr);
-void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *addr, struct TransferStats *stats);
-void send_ack(int socket, struct sockaddr_ll *addr, uint8_t type);
-void send_error(int socket, struct sockaddr_ll *addr, uint8_t error_code);
+
 
 void display_help(const char* program_name) {
-    printf(ANSI_COLOR_BLUE "NARBS Server (Not A Real Backup Solution)\n" ANSI_COLOR_RESET);
+    printf(BLUE "NARBS Server (Not A Real Backup Solution)\n" RESET);
 
-    printf(ANSI_COLOR_GREEN "Usage:\n" ANSI_COLOR_RESET);
+    printf(GREEN "Usage:\n" RESET);
     printf("  %s <interface>\n\n", program_name);
 
-    printf(ANSI_COLOR_YELLOW "Description:\n" ANSI_COLOR_RESET);
+    printf(YELLOW "Description:\n" RESET);
     printf("  Server component that handles:\n");
     printf("  • File backup requests\n");
     printf("  • File restoration requests\n");
     printf("  • Backup verification requests\n\n");
 
-    printf(ANSI_COLOR_BLUE "Storage:\n" ANSI_COLOR_RESET);
+    printf(BLUE "Storage:\n" RESET);
     printf("  Files are stored in: %s\n\n", BACKUP_DIR);
 
-    printf(ANSI_COLOR_YELLOW "Options:\n" ANSI_COLOR_RESET);
+    printf(YELLOW "Options:\n" RESET);
     printf("  -h        - Display this help message");
-}
-
-int main(int argc, char *argv[]) {
-    debug_init();  // Initialize debug system
-
-    if (argc == 2 && strcmp(argv[1], "-h") == 0) {
-        display_help(argv[0]);
-        return 0;
-    }
-
-    if (argc != 2) {
-        fprintf(stderr, ANSI_COLOR_RED "Error: Invalid number of arguments\n" ANSI_COLOR_RESET);
-        fprintf(stderr, "Use '%s -h' for help\n", argv[0]);
-        exit(1);
-    }
-
-    umask(0);  // For file creation permissions
-
-    int socket = cria_raw_socket(argv[1]);
-    if (socket < 0) {
-        fprintf(stderr, ANSI_COLOR_RED "Error: Could not create socket on interface %s\n" ANSI_COLOR_RESET, argv[1]);
-        exit(1);
-    }
-
-    Packet packet = {0};
-    mkdir(BACKUP_DIR, 0777);
-    struct sockaddr_ll client_addr;
-    struct TransferStats stats;
-
-    while (1) {
-        if (receive_packet(socket, &packet, &client_addr) > 0) {
-            switch (packet.type & TYPE_MASK) {
-                case PKT_BACKUP:
-                    if (current_state != STATE_IDLE) {
-                        send_error(socket, &client_addr, ERR_SEQUENCE);
-                        break;
-                    }
-                    current_state = STATE_RECEIVING;
-                    size_t expected_file_size = *((size_t *)(packet.data + strlen(packet.data) + 1));
-                    transfer_init_stats(&stats, expected_file_size);
-                    handle_backup(socket, &packet, &client_addr, &stats);
-                    break;
-
-                case PKT_DATA:
-                    if (current_state != STATE_RECEIVING || current_fd < 0) {
-                        send_error(socket, &client_addr, ERR_SEQUENCE);
-                        break;
-                    }
-                    handle_data_packet(socket, &packet, current_fd, &client_addr, &stats);
-                    break;
-
-                case PKT_END_TX:
-                    if (current_state != STATE_RECEIVING || current_fd < 0) {
-                        send_error(socket, &client_addr, ERR_SEQUENCE);
-                        break;
-                    }
-                    DBG_INFO("Received END_TX\n");
-                    print_transfer_summary(&stats);
-
-                    if (stats.total_received == stats.total_expected) {
-                        packet.type = PKT_OK_CHSUM;
-                        send_packet(socket, &packet, &client_addr);
-                        DBG_INFO("Transfer completed successfully\n");
-                    } else {
-                        DBG_ERROR("Incomplete transfer: %zu/%zu bytes\n",
-                                  stats.total_received, stats.total_expected);
-                        send_error(socket, &client_addr, ERR_SEQUENCE);
-                    }
-                    close(current_fd);
-                    current_fd = -1;
-                    current_state = STATE_IDLE;
-                    break;
-
-                case PKT_RESTORE:
-                    if (current_state != STATE_IDLE) {
-                        send_error(socket, &client_addr, ERR_SEQUENCE);
-                        break;
-                    }
-                    handle_restore(socket, &packet, &client_addr);
-                    break;
-
-                case PKT_VERIFY:
-                    if (current_state != STATE_IDLE) {
-                        send_error(socket, &client_addr, ERR_SEQUENCE);
-                        break;
-                    }
-                    handle_verify(socket, &packet, &client_addr);
-                    break;
-
-                case PKT_ERROR:
-                    DBG_ERROR("Received error from client: code %d\n", packet.data[0]);
-
-                    if (current_fd >= 0) {
-                        close(current_fd);
-                        current_fd = -1;
-                    }
-                    current_state = STATE_IDLE;
-
-                    break;
-            }
-        }
-    }
-
-    return 0;
 }
 
 void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *addr, struct TransferStats *stats) {
@@ -375,20 +265,106 @@ void handle_verify(int socket, Packet *packet, struct sockaddr_ll *addr) {
     }
 }
 
-void send_ack(int socket, struct sockaddr_ll *addr, uint8_t type) {
-    Packet ack = {0};
-    ack.start_marker = START_MARKER;
-    ack.type = type;
-    ack.sequence = 0;
-    ack.length = 0;
-    send_packet(socket, &ack, addr);
-}
+int main(int argc, char *argv[]) {
+    debug_init();  // Initialize debug system
 
-void send_error(int socket, struct sockaddr_ll *addr, uint8_t error_code) {
-    Packet error = {0};
-    error.start_marker = START_MARKER;
-    error.type = PKT_ERROR;
-    error.data[0] = error_code;
-    error.length = 1;
-    send_packet(socket, &error, addr);
+    if (argc == 2 && strcmp(argv[1], "-h") == 0) {
+        display_help(argv[0]);
+        return 0;
+    }
+
+    if (argc != 2) {
+        fprintf(stderr, RED "Error: Invalid number of arguments\n" RESET);
+        fprintf(stderr, "Use '%s -h' for help\n", argv[0]);
+        exit(1);
+    }
+
+    umask(0);  // For file creation permissions
+
+    int socket = cria_raw_socket(argv[1]);
+    if (socket < 0) {
+        fprintf(stderr, RED "Error: Could not create socket on interface %s\n" RESET, argv[1]);
+        exit(1);
+    }
+
+    Packet packet = {0};
+    mkdir(BACKUP_DIR, 0777);
+    struct sockaddr_ll client_addr;
+    struct TransferStats stats;
+
+    while (1) {
+        if (receive_packet(socket, &packet, &client_addr) > 0) {
+            switch (packet.type & TYPE_MASK) {
+                case PKT_BACKUP:
+                    if (current_state != STATE_IDLE) {
+                        send_error(socket, &client_addr, ERR_SEQUENCE);
+                        break;
+                    }
+                    current_state = STATE_RECEIVING;
+                    size_t expected_file_size = *((size_t *)(packet.data + strlen(packet.data) + 1));
+                    transfer_init_stats(&stats, expected_file_size);
+                    handle_backup(socket, &packet, &client_addr, &stats);
+                    break;
+
+                case PKT_DATA:
+                    if (current_state != STATE_RECEIVING || current_fd < 0) {
+                        send_error(socket, &client_addr, ERR_SEQUENCE);
+                        break;
+                    }
+                    handle_data_packet(socket, &packet, current_fd, &client_addr, &stats);
+                    break;
+
+                case PKT_END_TX:
+                    if (current_state != STATE_RECEIVING || current_fd < 0) {
+                        send_error(socket, &client_addr, ERR_SEQUENCE);
+                        break;
+                    }
+                    DBG_INFO("Received END_TX\n");
+                    print_transfer_summary(&stats);
+
+                    if (stats.total_received == stats.total_expected) {
+                        packet.type = PKT_OK_CHSUM;
+                        send_packet(socket, &packet, &client_addr);
+                        DBG_INFO("Transfer completed successfully\n");
+                    } else {
+                        DBG_ERROR("Incomplete transfer: %zu/%zu bytes\n",
+                                  stats.total_received, stats.total_expected);
+                        send_error(socket, &client_addr, ERR_SEQUENCE);
+                    }
+                    close(current_fd);
+                    current_fd = -1;
+                    current_state = STATE_IDLE;
+                    break;
+
+                case PKT_RESTORE:
+                    if (current_state != STATE_IDLE) {
+                        send_error(socket, &client_addr, ERR_SEQUENCE);
+                        break;
+                    }
+                    handle_restore(socket, &packet, &client_addr);
+                    break;
+
+                case PKT_VERIFY:
+                    if (current_state != STATE_IDLE) {
+                        send_error(socket, &client_addr, ERR_SEQUENCE);
+                        break;
+                    }
+                    handle_verify(socket, &packet, &client_addr);
+                    break;
+
+                case PKT_ERROR:
+                    DBG_ERROR("Received error from client: code %d\n", packet.data[0]);
+
+                    if (current_fd >= 0) {
+                        close(current_fd);
+                        current_fd = -1;
+                    }
+                    current_state = STATE_IDLE;
+
+                    break;
+            }
+        }
+    }
+
+    return 0;
 }

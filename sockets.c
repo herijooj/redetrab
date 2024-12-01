@@ -94,6 +94,24 @@ uint8_t calculate_crc(Packet *packet) {
     return crc;
 }
 
+void send_ack(int socket, struct sockaddr_ll *addr, uint8_t type) {
+    Packet ack = {0};
+    ack.start_marker = START_MARKER;
+    ack.type = type;
+    ack.sequence = 0;
+    ack.length = 0;
+    send_packet(socket, &ack, addr);
+}
+
+void send_error(int socket, struct sockaddr_ll *addr, uint8_t error_code) {
+    Packet error = {0};
+    error.start_marker = START_MARKER;
+    error.type = PKT_ERROR;
+    error.data[0] = error_code;
+    error.length = 1;
+    send_packet(socket, &error, addr);
+}
+
 int validate_packet(Packet *packet) {
     // Check start marker
     if (packet->start_marker != START_MARKER) {
