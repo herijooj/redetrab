@@ -11,15 +11,12 @@ void verify_file(int socket, char *filename, struct sockaddr_ll *addr);
 
 void display_help(const char* program_name) {
     printf(BLUE "NARBS Client (Not A Real Backup Solution)\n" RESET);
-
     printf(GREEN "Usage:\n" RESET);
     printf("  %s <interface> <command> <filename>\n\n", program_name);
-
     printf(YELLOW "Commands:\n" RESET);
     printf("  backup    - Create a backup of a file\n");
     printf("  restaura  - Restore a file from backup\n");
-    printf("  verifica - Verify if a file exists in backup\n\n");
-
+    printf("  verifica  - Verify if a file exists in backup\n\n");
     printf(YELLOW "Options:\n" RESET);
     printf("  -h        - Display this help message");
 }
@@ -61,7 +58,6 @@ int read_mac_from_config(const char *config_file, unsigned char *mac_addr) {
 void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
     DBG_INFO("Starting backup of %s\n", filename);
 
-    // Validate file path
     char resolved_path[PATH_MAX];
     if (realpath(filename, resolved_path) == NULL) {
         DBG_ERROR("Cannot resolve file path %s: %s\n", filename, strerror(errno));
@@ -69,15 +65,13 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
         return;
     }
 
-    // Get just the filename for the packet
     char *base_filename = strrchr(resolved_path, '/');
     if (base_filename) {
-        base_filename++; // Skip the '/'
+        base_filename++;
     } else {
         base_filename = resolved_path;
     }
 
-    // Open the file using the full resolved path
     int fd = open(resolved_path, O_RDONLY);
     if (fd < 0) {
         DBG_ERROR("Cannot open file %s: %s\n", resolved_path, strerror(errno));
@@ -92,7 +86,7 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
         return;
     }
 
-    uint64_t total_size = st.st_size;  // Changed from size_t
+    uint64_t total_size = st.st_size;
     DBG_INFO("File size: %lu bytes\n", total_size);
 
     struct TransferStats stats;
@@ -100,12 +94,10 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
     size_t total_chunks = (total_size + MAX_DATA_SIZE - 1) / MAX_DATA_SIZE;
     DBG_INFO("File will be sent in %zu chunks\n", total_chunks);
 
-    // Send initial backup packet with file info
     Packet packet = {0};
     packet.start_marker = START_MARKER;
     packet.type = PKT_BACKUP;
 
-    // Pack filename and size
     size_t max_filename_len = MAX_DATA_SIZE - sizeof(size_t) - 1;
     if (strlen(base_filename) >= max_filename_len) {
         DBG_ERROR("Filename too long (max %zu chars): %s\n", max_filename_len - 1, base_filename);
@@ -127,13 +119,11 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
         return;
     }
 
-    // Transfer file data
     char buffer[MAX_DATA_SIZE];
-    uint16_t seq = 0;  // Use uint16_t for sequence numbers
+    uint16_t seq = 0;
 
     while (stats.total_received < total_size) {
-        // Limit read size to MAX_DATA_SIZE
-        uint64_t to_read = total_size - stats.total_received;  // Changed from size_t
+        uint64_t to_read = total_size - stats.total_received;
         if (to_read > MAX_DATA_SIZE) {
             to_read = MAX_DATA_SIZE;
         }
@@ -142,33 +132,29 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
         if (bytes <= 0) {
             DBG_ERROR("Read error: %s\n", strerror(errno));
 
-            // Send an error packet to the server
             Packet error_packet = {0};
             error_packet.start_marker = START_MARKER;
             error_packet.type = PKT_ERROR;
             error_packet.length = 1;
-            error_packet.data[0] = ERR_NO_ACCESS; // Or appropriate error code
+            error_packet.data[0] = ERR_NO_ACCESS;
             send_packet(socket, &error_packet, addr);
 
             close(fd);
             return;
         }
 
-        // Validate bytes read
         if (bytes > MAX_DATA_SIZE) {
             DBG_ERROR("Read more bytes than allowed: %zd\n", bytes);
             close(fd);
             return;
         }
 
-        // Ensure not exceeding total_size
         if (stats.total_received + bytes > total_size) {
             DBG_ERROR("Attempting to send more data than total size\n");
             close(fd);
             return;
         }
 
-        // Ensure sequence number doesn't overflow
         if (seq > SEQ_MASK) {
             DBG_ERROR("Sequence number overflow\n");
             close(fd);
@@ -196,7 +182,6 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
                         transfer_update_stats(&stats, bytes, current_seq);
                         seq = (current_seq + 1) & SEQ_MASK;
                         
-                        // Handle wrap-around
                         if (seq == 0) {
                             transfer_handle_wrap(&stats);
                         }
@@ -218,14 +203,14 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
                 if (retries >= MAX_RETRIES) {
                     DBG_ERROR("Failed to send chunk after %d retries\n", MAX_RETRIES);
                     close(fd);
-                    return;  // Exit without sending PKT_END_TX
+                    return;
                 }
             } else {
-                retries = 0;  // Reset retries after a successful send
+                retries = 0;
             }
         }
     }
-    // Only send PKT_END_TX if all data was sent successfully
+
     if (stats.total_received == total_size) {
         DBG_INFO("All chunks sent successfully, sending END_TX\n");
         packet.type = PKT_END_TX;
@@ -267,9 +252,7 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
     packet.length = strlen(packet.data);
     send_packet(socket, &packet, addr);
 
-    // Receive response from server
     if (receive_packet(socket, &packet, addr) > 0) {
-        // First check for error response
         if ((packet.type & TYPE_MASK) == PKT_ERROR) {
             if (packet.data[0] == ERR_NOT_FOUND) {
                 fprintf(stderr, RED "Error: File '%s' not found in backup\n" RESET, filename);
@@ -279,9 +262,8 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
             return 1;
         }
         
-        // If not an error, proceed with size packet check
         if (packet.type == PKT_SIZE) {
-            uint64_t total_size = *((uint64_t *)packet.data);  // Changed from size_t
+            uint64_t total_size = *((uint64_t *)packet.data);
             DBG_INFO("File size to restore: %lu bytes\n", total_size);
 
             struct TransferStats stats;
@@ -290,10 +272,10 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
             int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (fd < 0) {
                 DBG_ERROR("Cannot create file %s: %s\n", filename, strerror(errno));
-                return 1; // Return non-zero on error
+                return 1;
             }
 
-            uint16_t expected_seq = 0;  // Use uint16_t for sequence numbers
+            uint16_t expected_seq = 0;
 
             while (stats.total_received < total_size) {
                 if (receive_packet(socket, &packet, addr) <= 0) {
@@ -315,7 +297,7 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
                         if (write(fd, packet.data, packet.length & LEN_MASK) < 0) {
                             fprintf(stderr, "Write error\n");
                             close(fd);
-                            return 1; // Return error code
+                            return 1;
                         }
 
                         expected_seq = (recv_seq + 1) & SEQ_MASK;
@@ -325,7 +307,6 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
                         DBG_INFO("Progress: %.1f%% (%lu/%lu bytes)\n",
                                  progress, stats.total_received, total_size);
 
-                        // Send ACK for the received packet
                         Packet ack = {0};
                         ack.start_marker = START_MARKER;
                         ack.type = PKT_OK;
@@ -338,7 +319,7 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
                         print_transfer_summary(&stats);
                         DBG_INFO("Transfer completed successfully\n");
                         close(fd);
-                        return 0; // Return 0 on success
+                        return 0;
                     case PKT_ERROR:
                         if (packet.data[0] == ERR_NOT_FOUND) {
                             fprintf(stderr, "Error: File '%s' not found in server backup.\n", filename);
@@ -346,15 +327,14 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
                             fprintf(stderr, "Error: Received error code %d\n", packet.data[0]);
                         }
                         close(fd);
-                        return 1; // Return error code
+                        return 1;
                     case PKT_NACK:
                         fprintf(stderr, "Transfer failed\n");
                         close(fd);
-                        return 1; // Return error code
+                        return 1;
                 }
             }
 
-            // If the transfer completes without receiving END_TX
             print_transfer_summary(&stats);
             DBG_INFO("Transfer completed successfully\n");
             close(fd);
@@ -389,7 +369,7 @@ void verify_file(int socket, char *filename, struct sockaddr_ll *addr) {
 }
 
 int main(int argc, char *argv[]) {
-    debug_init();  // Initialize debug system
+    debug_init();
 
     if (argc == 2 && strcmp(argv[1], "-h") == 0) {
         display_help(argv[0]);
@@ -408,7 +388,6 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    // Replace hardcoded MAC with config reading
     unsigned char server_mac[ETH_ALEN];
     if (read_mac_from_config("config.cfg", server_mac) != 0) {
         fprintf(stderr, RED "Error: Failed to read MAC address from config file.\n" RESET);
@@ -421,7 +400,7 @@ int main(int argc, char *argv[]) {
     } else if (strcmp(argv[2], "restaura") == 0) {
         if (restore_file(socket, argv[3], &addr) != 0) {
             fprintf(stderr, "An error occurred during file restoration.\n");
-            exit(1); // Exit gracefully on error
+            exit(1);
         }
     } else if (strcmp(argv[2], "verifica") == 0) {
         verify_file(socket, argv[3], &addr);
