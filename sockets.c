@@ -83,7 +83,7 @@ int set_socket_timeout(int socket, int timeout_ms) {
 
 uint8_t calculate_crc(Packet *packet) {
     uint8_t crc = 0;
-    uint16_t size_seq_type_net = htons(packet->size_seq_type);  // Convert to network order for CRC
+    uint16_t size_seq_type_net = packet->size_seq_type;
     
     crc ^= packet->start_marker;
     crc ^= (size_seq_type_net >> 8) & 0xFF;    // High byte
@@ -139,8 +139,9 @@ int validate_packet(Packet *packet) {
 
 int send_packet(int socket, Packet *packet, struct sockaddr_ll *addr) {
     packet->start_marker = START_MARKER;
-    packet->crc = calculate_crc(packet);        // Calculate CRC before conversion
-    packet->size_seq_type = htons(packet->size_seq_type);  // Convert to network order
+    packet->crc = calculate_crc(packet);
+    // do not convert size_seq_type to network byte order before sending
+    packet->size_seq_type = packet->size_seq_type;
 
     debug_packet("TX", packet);
     ssize_t sent = sendto(socket, packet, sizeof(Packet), 0,
@@ -170,7 +171,7 @@ ssize_t receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr) {
         }
 
         // Convert size_seq_type from network to host byte order after receiving
-        packet->size_seq_type = ntohs(packet->size_seq_type);
+        packet->size_seq_type = packet->size_seq_type;
 
         if (validate_packet(packet) < 0) {
             continue;
