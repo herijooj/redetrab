@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <time.h>
 
 // Debug levels
 enum {
@@ -31,6 +32,7 @@ struct TransferStats {
     uint16_t expected_seq;      
     uint32_t wrap_count;        // Track number of sequence wraps
     uint64_t total_sequences;   // Track total sequence count across wraps
+    time_t last_packet_time;    // Add timestamp field
     int had_errors;
 };
 

@@ -184,22 +184,41 @@ int receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr) {
     }
 }
 
+int validate_ack(const Packet *ack, uint8_t expected_type, uint16_t expected_seq) {
+    if (!ack) return -1;
+    
+    if (GET_TYPE(ack->size_seq_type) != expected_type) {
+        DBG_WARN("Wrong ACK type: expected %d, got %d\n", 
+                 expected_type, GET_TYPE(ack->size_seq_type));
+        return -1;
+    }
+    
+    if (expected_type == PKT_OK && 
+        GET_SEQUENCE(ack->size_seq_type) != expected_seq) {
+        DBG_WARN("Wrong ACK sequence: expected %d, got %d\n",
+                 expected_seq, GET_SEQUENCE(ack->size_seq_type));
+        return -1;
+    }
+    
+    return 0;
+}
+
 int wait_for_ack(int socket, Packet *packet, struct sockaddr_ll *addr, uint8_t expected_type) {
     int retries = 0;
+    uint16_t expected_seq = GET_SEQUENCE(packet->size_seq_type);
 
     while (retries < MAX_RETRIES) {
         if (receive_packet(socket, packet, addr) > 0) {
-            uint8_t received_type = GET_TYPE(packet->size_seq_type);
-            if (received_type == expected_type) {
+            if (validate_ack(packet, expected_type, expected_seq) == 0) {
                 return 0;
             }
-            if (received_type == PKT_NACK) {
-                DBG_WARN("Received NACK\n");
+            if (GET_TYPE(packet->size_seq_type) == PKT_ERROR) {
+                DBG_ERROR("Received error response: %d\n", packet->data[0]);
                 return -1;
             }
         }
         retries++;
-        DBG_WARN("Timeout waiting for ACK, retry %d/%d\n", retries, MAX_RETRIES);
+        DBG_WARN("Invalid or no ACK received, retry %d/%d\n", retries, MAX_RETRIES);
         usleep(RETRY_DELAY_MS * 1000);
     }
     return -1;

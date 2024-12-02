@@ -11,6 +11,8 @@
 
 static int current_state = STATE_IDLE;
 static int current_fd = -1;
+static volatile sig_atomic_t running = 1;
+static time_t last_packet_time;
 
 void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *addr, struct TransferStats *stats);
 void handle_backup(int socket, Packet *packet, struct sockaddr_ll *addr, struct TransferStats *stats);
@@ -34,6 +36,9 @@ void display_help(const char* program_name) {
 
 void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *addr, struct TransferStats *stats) {
     size_t data_len = GET_SIZE(packet->size_seq_type);
+    uint16_t recv_seq = GET_SEQUENCE(packet->size_seq_type);
+
+    DBG_INFO("Received DATA packet: seq=%d, len=%zu\n", recv_seq, data_len);
 
     if (data_len > MAX_DATA_SIZE) {
         DBG_ERROR("Invalid packet length: %zu (max %d)\n", data_len, MAX_DATA_SIZE);
@@ -55,7 +60,6 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
 
     DBG_INFO("DATA packet: seq=%d/%d, len=%zu, total=%zu/%zu\n", GET_SEQUENCE(packet->size_seq_type), stats->expected_seq, data_len, stats->total_received, stats->total_expected);
 
-    uint16_t recv_seq = GET_SEQUENCE(packet->size_seq_type);
     uint16_t exp_seq = stats->expected_seq & SEQ_MASK;
 
     if (recv_seq != exp_seq) {
@@ -87,11 +91,16 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
     float progress = (float)(stats->total_received * 100.0) / stats->total_expected;
     DBG_INFO("Progress: %.1f%% (%lu/%lu bytes)\n", progress, stats->total_received, stats->total_expected);
 
+    // Update timing after successful packet processing
+    stats->last_packet_time = time(NULL);
+    
+    // Send acknowledgment with same sequence number
     Packet ack = {0};
     ack.start_marker = START_MARKER;
     SET_TYPE(ack.size_seq_type, PKT_OK);
-    SET_SEQUENCE(ack.size_seq_type, GET_SEQUENCE(packet->size_seq_type));
+    SET_SEQUENCE(ack.size_seq_type, recv_seq);
     SET_SIZE(ack.size_seq_type, 0);
+    ack.crc = calculate_crc(&ack);
     send_packet(socket, &ack, addr);
 }
 
@@ -120,6 +129,8 @@ void handle_backup(int socket, Packet *packet, struct sockaddr_ll *addr, struct 
         return;
     }
     current_fd = fd;
+    current_state = STATE_RECEIVING;  // Add this line to set state
+    stats->last_packet_time = time(NULL);  // Initialize packet timing
 
     if (set_socket_timeout(socket, SOCKET_TIMEOUT_MS) < 0) {
         DBG_ERROR("Failed to set transfer timeout\n");
@@ -131,6 +142,8 @@ void handle_backup(int socket, Packet *packet, struct sockaddr_ll *addr, struct 
 
     send_ack(socket, addr, PKT_ACK);
     send_ack(socket, addr, PKT_OK_SIZE);
+
+    DBG_INFO("Backup initialized, waiting for data...\n");
 }
 
 void handle_restore(int socket, Packet *packet, struct sockaddr_ll *addr) {
@@ -227,6 +240,31 @@ void handle_verify(int socket, Packet *packet, struct sockaddr_ll *addr) {
     }
 }
 
+void cleanup_transfer() {
+    if (current_fd >= 0) {
+        close(current_fd);
+        current_fd = -1;
+    }
+    current_state = STATE_IDLE;
+}
+
+void signal_handler(int signum) {
+    running = 0;
+    cleanup_transfer();
+}
+
+void setup_signal_handlers() {
+    struct sigaction sa = {0};
+    sa.sa_handler = signal_handler;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+}
+
+void reset_transfer_state(int sock) {
+    cleanup_transfer();
+    set_socket_timeout(sock, SOCKET_TIMEOUT_MS);
+}
+
 int main(int argc, char *argv[]) {
     debug_init();
 
@@ -249,52 +287,63 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
+    setup_signal_handlers();
+
     Packet packet = {0};
     mkdir(BACKUP_DIR, 0777);
     struct sockaddr_ll client_addr;
     struct TransferStats stats;
 
-    while (1) {
+    last_packet_time = time(NULL);
+
+    while (running) {
         if (receive_packet(socket, &packet, &client_addr) > 0) {
+            if (current_state == STATE_RECEIVING && 
+                time(NULL) - last_packet_time > TIMEOUT_SEC) {
+                DBG_WARN("Transfer timeout, cleaning up\n");
+                reset_transfer_state(socket);
+                continue;
+            }
+
             switch (GET_TYPE(packet.size_seq_type)) {
                 case PKT_BACKUP:
                     if (current_state != STATE_IDLE) {
                         send_error(socket, &client_addr, ERR_SEQUENCE);
-                        break;
+                        reset_transfer_state(socket);
+                    } else {
+                        size_t expected_file_size = *((size_t *)(packet.data + strlen(packet.data) + 1));
+                        transfer_init_stats(&stats, expected_file_size);
+                        handle_backup(socket, &packet, &client_addr, &stats);
                     }
-                    current_state = STATE_RECEIVING;
-                    size_t expected_file_size = *((size_t *)(packet.data + strlen(packet.data) + 1));
-                    transfer_init_stats(&stats, expected_file_size);
-                    handle_backup(socket, &packet, &client_addr, &stats);
                     break;
 
                 case PKT_DATA:
                     if (current_state != STATE_RECEIVING || current_fd < 0) {
                         send_error(socket, &client_addr, ERR_SEQUENCE);
-                        break;
+                        reset_transfer_state(socket);
+                    } else {
+                        last_packet_time = time(NULL);
+                        handle_data_packet(socket, &packet, current_fd, &client_addr, &stats);
                     }
-                    handle_data_packet(socket, &packet, current_fd, &client_addr, &stats);
                     break;
 
                 case PKT_END_TX:
-                    if (current_state != STATE_RECEIVING || current_fd < 0) {
-                        send_error(socket, &client_addr, ERR_SEQUENCE);
-                        break;
-                    }
-                    DBG_INFO("Received END_TX\n");
-                    print_transfer_summary(&stats);
+                    if (current_state == STATE_RECEIVING) {
+                        DBG_INFO("Received END_TX\n");
+                        print_transfer_summary(&stats);
 
-                    if (stats.total_received == stats.total_expected) {
-                        SET_TYPE(packet.size_seq_type, PKT_OK_CHSUM);
-                        send_packet(socket, &packet, &client_addr);
-                        DBG_INFO("Transfer completed successfully\n");
+                        if (stats.total_received == stats.total_expected) {
+                            SET_TYPE(packet.size_seq_type, PKT_OK_CHSUM);
+                            send_packet(socket, &packet, &client_addr);
+                            DBG_INFO("Transfer completed successfully\n");
+                        } else {
+                            DBG_ERROR("Incomplete transfer: %zu/%zu bytes\n", stats.total_received, stats.total_expected);
+                            send_error(socket, &client_addr, ERR_SEQUENCE);
+                        }
+                        reset_transfer_state(socket);
                     } else {
-                        DBG_ERROR("Incomplete transfer: %zu/%zu bytes\n", stats.total_received, stats.total_expected);
                         send_error(socket, &client_addr, ERR_SEQUENCE);
                     }
-                    close(current_fd);
-                    current_fd = -1;
-                    current_state = STATE_IDLE;
                     break;
 
                 case PKT_RESTORE:
@@ -314,6 +363,11 @@ int main(int argc, char *argv[]) {
                     break;
 
                 case PKT_ERROR:
+                    DBG_WARN("Client error received, cleaning up transfer\n");
+                    reset_transfer_state(socket);
+                    break;
+
+                default:
                     DBG_ERROR("Received error from client: code %d\n", packet.data[0]);
 
                     if (current_fd >= 0) {
@@ -323,8 +377,13 @@ int main(int argc, char *argv[]) {
                     current_state = STATE_IDLE;
                     break;
             }
+        } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            DBG_ERROR("Socket error: %s\n", strerror(errno));
+            break;
         }
     }
 
+    cleanup_transfer();
+    close(socket);
     return 0;
 }

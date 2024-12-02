@@ -49,6 +49,9 @@
 #define MAX_RETRIES 5
 #define RETRY_DELAY_MS 500      // 500 milliseconds
 
+// Add after the existing definitions
+#define TRANSFER_TIMEOUT_SEC 30  // Transfer timeout in seconds
+
 // Masks and shifts
 #define SIZE_MASK 0xFC00  // Bits 15-10 (6 bits)
 #define SIZE_SHIFT 10
@@ -105,6 +108,9 @@ int wait_for_ack(int socket, Packet *packet, struct sockaddr_ll *addr, uint8_t e
 int get_interface_info(int socket, char *interface, struct sockaddr_ll *addr);
 int cria_raw_socket(char *nome_interface_rede);
 int validate_packet(Packet *packet);
+
+// Add new validation function declaration
+int validate_ack(const Packet *ack, uint8_t expected_type, uint16_t expected_seq);
 
 struct PacketStats {
     uint64_t total_bytes;       // Changed from size_t
