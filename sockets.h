@@ -21,11 +21,6 @@
 
 #define START_MARKER 0xAA
 
-// Masks
-#define TYPE_MASK 0x1F  // 5 bits
-#define SEQ_MASK 0xFFFF // 16 bits
-#define LEN_MASK 0x3F   // 6 bits
-
 // Packet types
 #define PKT_NACK      0x01  // 00001 Negative acknowledgment
 #define PKT_OK        0x02  // 00010 OK
@@ -54,21 +49,46 @@
 #define MAX_RETRIES 5
 #define RETRY_DELAY_MS 500      // 500 milliseconds
 
-// Sequence number comparison macros
-#define SEQ_DIFF(a, b) ((uint16_t)((a) - (b)) & SEQ_MASK)
-#define SEQ_LT(a, b)   (SEQ_DIFF(a, b) > (SEQ_MASK/2))
-#define SEQ_GT(a, b)   (SEQ_DIFF(b, a) > (SEQ_MASK/2))
+// Masks and shifts
+#define SIZE_MASK 0xFC00  // Bits 15-10 (6 bits)
+#define SIZE_SHIFT 10
+
+#define SEQ_MASK  0x03E0  // Bits 9-5 (5 bits)
+#define SEQ_SHIFT 5
+
+#define TYPE_MASK 0x001F  // Bits 4-0 (5 bits)
+#define TYPE_SHIFT 0
+
+#define GET_SIZE(sst) (((sst) & SIZE_MASK) >> SIZE_SHIFT)
+#define GET_SEQUENCE(sst) (((sst) & SEQ_MASK) >> SEQ_SHIFT)
+#define GET_TYPE(sst) (((sst) & TYPE_MASK) >> TYPE_SHIFT)
+
+#define SET_SIZE(sst, size) \
+    ((sst) = ((sst) & ~SIZE_MASK) | (((size) & 0x3F) << SIZE_SHIFT))
+
+#define SET_SEQUENCE(sst, sequence) \
+    ((sst) = ((sst) & ~SEQ_MASK) | (((sequence) & 0x1F) << SEQ_SHIFT))
+
+#define SET_TYPE(sst, type) \
+    ((sst) = ((sst) & ~TYPE_MASK) | (((type) & 0x1F) << TYPE_SHIFT))
+
+#define SEQ_MAX 0x1F // 5 bits
+
+// Update sequence difference macro
+#define SEQ_DIFF(a, b) ((uint8_t)((a) - (b)) & SEQ_MAX)
+
+// Update sequence comparison macros
+#define SEQ_LT(a, b)   (SEQ_DIFF(a, b) > (SEQ_MAX / 2))
+#define SEQ_GT(a, b)   (SEQ_DIFF(b, a) > (SEQ_MAX / 2))
 #define SEQ_LEQ(a, b)  (!SEQ_GT(a, b))
 #define SEQ_GEQ(a, b)  (!SEQ_LT(a, b))
 
 #pragma pack(push, 1)
 struct Packet {
-    uint8_t start_marker;   // 8 bits
-    uint8_t length;         // 6 bits (masked)
-    uint16_t sequence;      // Changed from uint8_t to uint16_t
-    uint8_t type;           // 5 bits (masked)
+    uint8_t start_marker;     // 8 bits
+    uint16_t size_seq_type;   // size (6 bits), sequence (5 bits), type (5 bits)
     char data[MAX_DATA_SIZE];
-    uint8_t crc;            // 8 bits
+    uint8_t crc;              // 8 bits
 };
 #pragma pack(pop)
 

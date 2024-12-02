@@ -33,7 +33,7 @@ void display_help(const char* program_name) {
 }
 
 void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *addr, struct TransferStats *stats) {
-    size_t data_len = packet->length & LEN_MASK;
+    size_t data_len = GET_SIZE(packet->size_seq_type);
 
     if (data_len > MAX_DATA_SIZE) {
         DBG_ERROR("Invalid packet length: %zu (max %d)\n", data_len, MAX_DATA_SIZE);
@@ -41,8 +41,8 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
         return;
     }
 
-    if ((packet->sequence & SEQ_MASK) > SEQ_MASK) {
-        DBG_ERROR("Invalid sequence number: %d (max %d)\n", packet->sequence & SEQ_MASK, SEQ_MASK);
+    if (GET_SEQUENCE(packet->size_seq_type) > SEQ_MASK) {
+        DBG_ERROR("Invalid sequence number: %d (max %d)\n", GET_SEQUENCE(packet->size_seq_type), SEQ_MASK);
         send_error(socket, addr, ERR_SEQUENCE);
         return;
     }
@@ -53,9 +53,9 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
         return;
     }
 
-    DBG_INFO("DATA packet: seq=%d/%d, len=%zu, total=%zu/%zu\n", packet->sequence & SEQ_MASK, stats->expected_seq, data_len, stats->total_received, stats->total_expected);
+    DBG_INFO("DATA packet: seq=%d/%d, len=%zu, total=%zu/%zu\n", GET_SEQUENCE(packet->size_seq_type), stats->expected_seq, data_len, stats->total_received, stats->total_expected);
 
-    uint16_t recv_seq = packet->sequence & SEQ_MASK;
+    uint16_t recv_seq = GET_SEQUENCE(packet->size_seq_type);
     uint16_t exp_seq = stats->expected_seq & SEQ_MASK;
 
     if (recv_seq != exp_seq) {
@@ -89,8 +89,9 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
 
     Packet ack = {0};
     ack.start_marker = START_MARKER;
-    ack.type = PKT_OK;
-    ack.sequence = packet->sequence & SEQ_MASK;
+    SET_TYPE(ack.size_seq_type, PKT_OK);
+    SET_SEQUENCE(ack.size_seq_type, GET_SEQUENCE(packet->size_seq_type));
+    SET_SIZE(ack.size_seq_type, 0);
     send_packet(socket, &ack, addr);
 }
 
@@ -156,9 +157,9 @@ void handle_restore(int socket, Packet *packet, struct sockaddr_ll *addr) {
 
     Packet size_packet = {0};
     size_packet.start_marker = START_MARKER;
-    size_packet.type = PKT_SIZE;
+    SET_TYPE(size_packet.size_seq_type, PKT_SIZE);
     memcpy(size_packet.data, &total_size, sizeof(size_t));
-    size_packet.length = sizeof(size_t);
+    SET_SIZE(size_packet.size_seq_type, sizeof(size_t));
     send_packet(socket, &size_packet, addr);
 
     if (set_socket_timeout(socket, SOCKET_TIMEOUT_MS) < 0) {
@@ -177,14 +178,14 @@ void handle_restore(int socket, Packet *packet, struct sockaddr_ll *addr) {
     while ((bytes = read(fd, buffer, MAX_DATA_SIZE)) > 0) {
         Packet data = {0};
         data.start_marker = START_MARKER;
-        data.type = PKT_DATA;
-        data.sequence = seq & SEQ_MASK;
+        SET_TYPE(data.size_seq_type, PKT_DATA);
+        SET_SEQUENCE(data.size_seq_type, seq & SEQ_MASK);
         seq = (seq + 1) & SEQ_MASK;
-        data.length = bytes & LEN_MASK;
+        SET_SIZE(data.size_seq_type, bytes);
         memcpy(data.data, buffer, bytes);
 
         size_t remaining = total_size - bytes_sent - bytes;
-        DBG_INFO("Preparing chunk: seq=%d, size=%zd, remaining=%zu\n", data.sequence & SEQ_MASK, bytes, remaining);
+        DBG_INFO("Preparing chunk: seq=%d, size=%zd, remaining=%zu\n", GET_SEQUENCE(data.size_seq_type), bytes, remaining);
         DBG_INFO("Sending restore chunk: %zd bytes\n", bytes);
         send_packet(socket, &data, addr);
 
@@ -192,7 +193,7 @@ void handle_restore(int socket, Packet *packet, struct sockaddr_ll *addr) {
 
         Packet recv_packet;
         if (receive_packet(socket, &recv_packet, addr) > 0) {
-            if (recv_packet.type != PKT_OK || ((recv_packet.sequence & SEQ_MASK) != (seq - 1))) {
+            if (GET_TYPE(recv_packet.size_seq_type) != PKT_OK || (GET_SEQUENCE(recv_packet.size_seq_type) != (seq - 1))) {
                 DBG_WARN("Did not receive expected ACK\n");
             }
         } else {
@@ -202,9 +203,9 @@ void handle_restore(int socket, Packet *packet, struct sockaddr_ll *addr) {
 
     Packet end_tx = {0};
     end_tx.start_marker = START_MARKER;
-    end_tx.type = PKT_END_TX;
-    end_tx.sequence = 0;
-    end_tx.length = 0;
+    SET_TYPE(end_tx.size_seq_type, PKT_END_TX);
+    SET_SEQUENCE(end_tx.size_seq_type, 0);
+    SET_SIZE(end_tx.size_seq_type, 0);
     send_packet(socket, &end_tx, addr);
     DBG_INFO("Sent END_TX packet\n");
 
@@ -255,7 +256,7 @@ int main(int argc, char *argv[]) {
 
     while (1) {
         if (receive_packet(socket, &packet, &client_addr) > 0) {
-            switch (packet.type & TYPE_MASK) {
+            switch (GET_TYPE(packet.size_seq_type)) {
                 case PKT_BACKUP:
                     if (current_state != STATE_IDLE) {
                         send_error(socket, &client_addr, ERR_SEQUENCE);
@@ -284,7 +285,7 @@ int main(int argc, char *argv[]) {
                     print_transfer_summary(&stats);
 
                     if (stats.total_received == stats.total_expected) {
-                        packet.type = PKT_OK_CHSUM;
+                        SET_TYPE(packet.size_seq_type, PKT_OK_CHSUM);
                         send_packet(socket, &packet, &client_addr);
                         DBG_INFO("Transfer completed successfully\n");
                     } else {

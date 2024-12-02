@@ -84,11 +84,10 @@ int set_socket_timeout(int socket, int timeout_ms) {
 uint8_t calculate_crc(Packet *packet) {
     uint8_t crc = 0;
     crc ^= packet->start_marker;
-    crc ^= packet->length & LEN_MASK;
-    crc ^= (packet->sequence >> 8) & 0xFF;  // Include high byte
-    crc ^= packet->sequence & 0xFF;         // Include low byte
-    crc ^= packet->type & TYPE_MASK;
-    for (int i = 0; i < (packet->length & LEN_MASK); i++) {
+    crc ^= (packet->size_seq_type >> 8) & 0xFF;  // High byte
+    crc ^= packet->size_seq_type & 0xFF;         // Low byte
+    uint8_t size = GET_SIZE(packet->size_seq_type);
+    for (int i = 0; i < size; i++) {
         crc ^= packet->data[i];
     }
     return crc;
@@ -97,34 +96,34 @@ uint8_t calculate_crc(Packet *packet) {
 void send_ack(int socket, struct sockaddr_ll *addr, uint8_t type) {
     Packet ack = {0};
     ack.start_marker = START_MARKER;
-    ack.type = type;
-    ack.sequence = 0;
-    ack.length = 0;
+    SET_TYPE(ack.size_seq_type, type);
+    SET_SEQUENCE(ack.size_seq_type, 0);
+    SET_SIZE(ack.size_seq_type, 0);
+    ack.crc = calculate_crc(&ack);
     send_packet(socket, &ack, addr);
 }
 
 void send_error(int socket, struct sockaddr_ll *addr, uint8_t error_code) {
     Packet error = {0};
     error.start_marker = START_MARKER;
-    error.type = PKT_ERROR;
+    SET_TYPE(error.size_seq_type, PKT_ERROR);
+    SET_SEQUENCE(error.size_seq_type, 0);
+    SET_SIZE(error.size_seq_type, 1);
     error.data[0] = error_code;
-    error.length = 1;
+    error.crc = calculate_crc(&error);
     send_packet(socket, &error, addr);
 }
 
 int validate_packet(Packet *packet) {
-    // Check start marker
     if (packet->start_marker != START_MARKER) {
         DBG_WARN("Invalid start marker: 0x%02x\n", packet->start_marker);
         return -1;
     }
-    // Validate length field
-    size_t data_len = packet->length & LEN_MASK;
+    uint8_t data_len = GET_SIZE(packet->size_seq_type);
     if (data_len > MAX_DATA_SIZE) {
-        DBG_WARN("Invalid length: %zu\n", data_len);
+        DBG_WARN("Invalid data length: %u\n", data_len);
         return -1;
     }
-    // Verify CRC
     uint8_t computed_crc = calculate_crc(packet);
     if (packet->crc != computed_crc) {
         DBG_WARN("CRC mismatch: computed=0x%02x, received=0x%02x\n",
@@ -132,17 +131,20 @@ int validate_packet(Packet *packet) {
         debug_hex_dump("Packet dump: ", packet, sizeof(Packet));
         return -1;
     }
-    // Packet is valid
     return 0;
 }
 
 int send_packet(int socket, Packet *packet, struct sockaddr_ll *addr) {
     packet->start_marker = START_MARKER;
 
-    // Apply masks to ensure fields are within bounds
-    packet->type &= TYPE_MASK;
-    packet->sequence &= SEQ_MASK;
-    packet->length &= LEN_MASK;
+    // Ensure size_seq_type fields are within bounds
+    uint8_t size = GET_SIZE(packet->size_seq_type) & 0x3F;
+    uint8_t sequence = GET_SEQUENCE(packet->size_seq_type) & 0x1F;
+    uint8_t type = GET_TYPE(packet->size_seq_type) & 0x1F;
+
+    SET_SIZE(packet->size_seq_type, size);
+    SET_SEQUENCE(packet->size_seq_type, sequence);
+    SET_TYPE(packet->size_seq_type, type);
 
     packet->crc = calculate_crc(packet);
 
@@ -174,8 +176,7 @@ int receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr) {
         }
 
         if (validate_packet(packet) != 0) {
-            // Invalid packet, discard and continue
-            continue;
+            continue; // Invalid packet
         }
 
         debug_packet("RX", packet);
@@ -188,10 +189,11 @@ int wait_for_ack(int socket, Packet *packet, struct sockaddr_ll *addr, uint8_t e
 
     while (retries < MAX_RETRIES) {
         if (receive_packet(socket, packet, addr) > 0) {
-            if ((packet->type & TYPE_MASK) == expected_type) {
+            uint8_t received_type = GET_TYPE(packet->size_seq_type);
+            if (received_type == expected_type) {
                 return 0;
             }
-            if ((packet->type & TYPE_MASK) == PKT_NACK) {
+            if (received_type == PKT_NACK) {
                 DBG_WARN("Received NACK\n");
                 return -1;
             }

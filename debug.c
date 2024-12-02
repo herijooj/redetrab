@@ -49,8 +49,9 @@ void debug_hex_dump(const char *prefix, const void *data, size_t size) {
 void debug_packet(const char *prefix, const struct Packet *packet) {
     if (debug_level < DBG_LEVEL_INFO) return;
 
+    uint8_t type = GET_TYPE(packet->size_seq_type);
     const char *type_str;
-    switch (packet->type & TYPE_MASK) {
+    switch (type) {
         case PKT_NACK:      type_str = "NACK"; break;
         case PKT_OK:        type_str = "OK"; break;
         case PKT_BACKUP:    type_str = "BACKUP"; break;
@@ -63,10 +64,13 @@ void debug_packet(const char *prefix, const struct Packet *packet) {
         default:            type_str = "UNKNOWN"; break;
     }
 
+    uint8_t seq = GET_SEQUENCE(packet->size_seq_type);
+    uint8_t len = GET_SIZE(packet->size_seq_type);
+
     DBG_INFO("%s: type=%s seq=%u len=%u\n",
-             prefix, type_str, packet->sequence & SEQ_MASK, packet->length & LEN_MASK);
+             prefix, type_str, seq, len);
     if (debug_level >= DBG_LEVEL_TRACE) {
-        debug_hex_dump("  ", packet->data, packet->length & LEN_MASK);
+        debug_hex_dump("  ", packet->data, len);
     }
 }
 
