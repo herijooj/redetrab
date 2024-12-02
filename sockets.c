@@ -83,9 +83,12 @@ int set_socket_timeout(int socket, int timeout_ms) {
 
 uint8_t calculate_crc(Packet *packet) {
     uint8_t crc = 0;
+    uint16_t size_seq_type_net = htons(packet->size_seq_type);  // Convert to network order for CRC
+    
     crc ^= packet->start_marker;
-    crc ^= (packet->size_seq_type >> 8) & 0xFF;  // High byte
-    crc ^= packet->size_seq_type & 0xFF;         // Low byte
+    crc ^= (size_seq_type_net >> 8) & 0xFF;    // High byte
+    crc ^= size_seq_type_net & 0xFF;           // Low byte
+    
     uint8_t size = GET_SIZE(packet->size_seq_type);
     for (int i = 0; i < size; i++) {
         crc ^= packet->data[i];
@@ -136,21 +139,12 @@ int validate_packet(Packet *packet) {
 
 int send_packet(int socket, Packet *packet, struct sockaddr_ll *addr) {
     packet->start_marker = START_MARKER;
-
-    // Ensure size_seq_type fields are within bounds
-    uint8_t size = GET_SIZE(packet->size_seq_type) & 0x3F;
-    uint8_t sequence = GET_SEQUENCE(packet->size_seq_type) & 0x1F;
-    uint8_t type = GET_TYPE(packet->size_seq_type) & 0x1F;
-
-    SET_SIZE(packet->size_seq_type, size);
-    SET_SEQUENCE(packet->size_seq_type, sequence);
-    SET_TYPE(packet->size_seq_type, type);
-
-    packet->crc = calculate_crc(packet);
+    packet->crc = calculate_crc(packet);        // Calculate CRC before conversion
+    packet->size_seq_type = htons(packet->size_seq_type);  // Convert to network order
 
     debug_packet("TX", packet);
     ssize_t sent = sendto(socket, packet, sizeof(Packet), 0,
-                          (struct sockaddr *)addr, sizeof(*addr));
+                          (struct sockaddr *)addr, sizeof(*addr));    
     if (sent < 0) {
         DBG_ERROR("sendto failed: %s\n", strerror(errno));
         return -1;
@@ -159,7 +153,7 @@ int send_packet(int socket, Packet *packet, struct sockaddr_ll *addr) {
     return sent;
 }
 
-int receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr) {
+ssize_t receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr) {
     socklen_t addr_len = sizeof(*addr);
 
     while (1) {
@@ -175,8 +169,11 @@ int receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr) {
             continue;
         }
 
-        if (validate_packet(packet) != 0) {
-            continue; // Invalid packet
+        // Convert size_seq_type from network to host byte order after receiving
+        packet->size_seq_type = ntohs(packet->size_seq_type);
+
+        if (validate_packet(packet) < 0) {
+            continue;
         }
 
         debug_packet("RX", packet);

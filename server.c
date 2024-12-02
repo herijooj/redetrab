@@ -41,8 +41,8 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
         return;
     }
 
-    if (GET_SEQUENCE(packet->size_seq_type) > SEQ_MASK) {
-        DBG_ERROR("Invalid sequence number: %d (max %d)\n", GET_SEQUENCE(packet->size_seq_type), SEQ_MASK);
+    if (GET_SEQUENCE(packet->size_seq_type) > SEQ_NUM_MAX) {
+        DBG_ERROR("Invalid sequence number: %d (max %d)\n", GET_SEQUENCE(packet->size_seq_type), SEQ_NUM_MAX);
         send_error(socket, addr, ERR_SEQUENCE);
         return;
     }
@@ -55,11 +55,11 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
 
     DBG_INFO("DATA packet: seq=%d/%d, len=%zu, total=%zu/%zu\n", GET_SEQUENCE(packet->size_seq_type), stats->expected_seq, data_len, stats->total_received, stats->total_expected);
 
-    uint16_t recv_seq = GET_SEQUENCE(packet->size_seq_type);
-    uint16_t exp_seq = stats->expected_seq & SEQ_MASK;
+    uint8_t recv_seq = GET_SEQUENCE(packet->size_seq_type) & SEQ_FIELD_MASK;
+    uint8_t exp_seq = stats->expected_seq & SEQ_FIELD_MASK;
 
     if (recv_seq != exp_seq) {
-        if (recv_seq == 0 && exp_seq == SEQ_MASK) {
+        if (recv_seq == 0 && exp_seq == SEQ_NUM_MAX) {
             transfer_handle_wrap(stats);
         } else {
             DBG_ERROR("Sequence mismatch: expected %d, got %d (wrap count: %u)\n", exp_seq, recv_seq, stats->wrap_count);
@@ -80,7 +80,7 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
     stats->total_received += written;
     stats->packets_processed++;
     stats->last_sequence = recv_seq;
-    stats->expected_seq = (recv_seq + 1) & SEQ_MASK;
+    stats->expected_seq = (recv_seq + 1) & SEQ_NUM_MAX;
 
     DBG_INFO("Updated stats - received: %zu/%zu bytes, packets: %zu\n", stats->total_received, stats->total_expected, stats->packets_processed);
 
@@ -171,7 +171,7 @@ void handle_restore(int socket, Packet *packet, struct sockaddr_ll *addr) {
 
     char buffer[MAX_DATA_SIZE];
     ssize_t bytes;
-    uint16_t seq = 0;
+    uint8_t seq = 0;
     current_state = STATE_RECEIVING;
     size_t bytes_sent = 0;
 
@@ -179,8 +179,8 @@ void handle_restore(int socket, Packet *packet, struct sockaddr_ll *addr) {
         Packet data = {0};
         data.start_marker = START_MARKER;
         SET_TYPE(data.size_seq_type, PKT_DATA);
-        SET_SEQUENCE(data.size_seq_type, seq & SEQ_MASK);
-        seq = (seq + 1) & SEQ_MASK;
+        SET_SEQUENCE(data.size_seq_type, seq & SEQ_NUM_MAX);
+        seq = (seq + 1) & SEQ_NUM_MAX;
         SET_SIZE(data.size_seq_type, bytes);
         memcpy(data.data, buffer, bytes);
 
@@ -193,7 +193,9 @@ void handle_restore(int socket, Packet *packet, struct sockaddr_ll *addr) {
 
         Packet recv_packet;
         if (receive_packet(socket, &recv_packet, addr) > 0) {
-            if (GET_TYPE(recv_packet.size_seq_type) != PKT_OK || (GET_SEQUENCE(recv_packet.size_seq_type) != (seq - 1))) {
+            uint8_t expected_ack = (seq - 1) & SEQ_NUM_MAX;
+            if (GET_TYPE(recv_packet.size_seq_type) != PKT_OK || 
+                (GET_SEQUENCE(recv_packet.size_seq_type) & SEQ_NUM_MAX) != expected_ack) {
                 DBG_WARN("Did not receive expected ACK\n");
             }
         } else {

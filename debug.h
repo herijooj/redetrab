@@ -60,7 +60,7 @@ void print_transfer_summary(const struct TransferStats *stats);
 
 // Transfer-related functions
 void transfer_init_stats(struct TransferStats *stats, size_t expected_size);
-void transfer_update_stats(struct TransferStats *stats, size_t bytes, uint16_t seq);
+void transfer_update_stats(struct TransferStats *stats, size_t bytes, uint8_t seq);
 void transfer_handle_wrap(struct TransferStats *stats);
 
 #endif // DEBUG_H

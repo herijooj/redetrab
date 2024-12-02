@@ -4,6 +4,7 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <ctype.h>
+#include <arpa/inet.h> // For htons and ntohs
 
 void backup_file(int socket, char *filename, struct sockaddr_ll *addr);
 int restore_file(int socket, char *filename, struct sockaddr_ll *addr);
@@ -97,6 +98,7 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
     Packet packet = {0};
     packet.start_marker = START_MARKER;
     SET_TYPE(packet.size_seq_type, PKT_BACKUP);
+    SET_SEQUENCE(packet.size_seq_type, 0);
     SET_SIZE(packet.size_seq_type, strlen(base_filename) + 1 + sizeof(size_t));
 
     size_t max_filename_len = MAX_DATA_SIZE - sizeof(size_t) - 1;
@@ -120,7 +122,7 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
     }
 
     char buffer[MAX_DATA_SIZE];
-    uint16_t seq = 0;
+    uint8_t seq = 0;
 
     while (stats.total_received < total_size) {
         uint64_t to_read = total_size - stats.total_received;
@@ -155,7 +157,7 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
             return;
         }
 
-        if (seq > SEQ_MASK) {
+        if (seq > SEQ_MAX) {
             DBG_ERROR("Sequence number overflow\n");
             close(fd);
             return;
@@ -168,19 +170,21 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
         int retries = 0;
         bool chunk_sent = false;
 
-        uint16_t current_seq = seq & SEQ_MASK;
+        uint8_t current_seq = seq;
         
         while (retries < MAX_RETRIES && !chunk_sent) {
-            SET_TYPE(packet.size_seq_type, PKT_DATA);
-            SET_SEQUENCE(packet.size_seq_type, current_seq);
-            SET_SIZE(packet.size_seq_type, bytes & 0x3F);
-            memcpy(packet.data, buffer, bytes);
+            Packet data_packet = {0};
+            data_packet.start_marker = START_MARKER;
+            SET_TYPE(data_packet.size_seq_type, PKT_DATA);
+            SET_SEQUENCE(data_packet.size_seq_type, current_seq);
+            SET_SIZE(data_packet.size_seq_type, bytes & 0x3F);
+            memcpy(data_packet.data, buffer, bytes);
 
-            if (send_packet(socket, &packet, addr) >= 0) {
+            if (send_packet(socket, &data_packet, addr) >= 0) {
                 if (wait_for_ack(socket, &packet, addr, PKT_OK) == 0) {
                     if (SEQ_DIFF(GET_SEQUENCE(packet.size_seq_type), current_seq) == 0) {
                         transfer_update_stats(&stats, bytes, current_seq);
-                        seq = (current_seq + 1) & SEQ_MASK;
+                        seq = (current_seq + 1) & SEQ_NUM_MAX;
                         
                         if (seq == 0) {
                             transfer_handle_wrap(&stats);
@@ -213,14 +217,17 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
 
     if (stats.total_received == total_size) {
         DBG_INFO("All chunks sent successfully, sending END_TX\n");
-        SET_TYPE(packet.size_seq_type, PKT_END_TX);
-        SET_SIZE(packet.size_seq_type, 0);
+        Packet end_packet = {0};
+        end_packet.start_marker = START_MARKER;
+        SET_TYPE(end_packet.size_seq_type, PKT_END_TX);
+        SET_SEQUENCE(end_packet.size_seq_type, 0);
+        SET_SIZE(end_packet.size_seq_type, 0);
 
         int retries = 0;
         bool end_tx_sent = false;
         while (retries < MAX_RETRIES && !end_tx_sent) {
-            if (send_packet(socket, &packet, addr) >= 0 &&
-                wait_for_ack(socket, &packet, addr, PKT_OK_CHSUM) == 0) {
+            if (send_packet(socket, &end_packet, addr) >= 0 &&
+                wait_for_ack(socket, &end_packet, addr, PKT_OK_CHSUM) == 0) {
                 print_transfer_summary(&stats);
                 DBG_INFO("Transfer completed successfully\n");
                 end_tx_sent = true;
@@ -247,9 +254,10 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
     Packet packet = {0};
     packet.start_marker = START_MARKER;
     SET_TYPE(packet.size_seq_type, PKT_RESTORE);
+    SET_SEQUENCE(packet.size_seq_type, 0);
+    SET_SIZE(packet.size_seq_type, strlen(filename));
     strncpy(packet.data, filename, MAX_DATA_SIZE - 1);
     packet.data[MAX_DATA_SIZE - 1] = '\0';
-    SET_SIZE(packet.size_seq_type, strlen(packet.data));
     send_packet(socket, &packet, addr);
 
     if (receive_packet(socket, &packet, addr) > 0) {
@@ -275,7 +283,7 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
                 return 1;
             }
 
-            uint16_t expected_seq = 0;
+            uint8_t expected_seq = 0;
 
             while (stats.total_received < total_size) {
                 if (receive_packet(socket, &packet, addr) <= 0) {
@@ -286,7 +294,7 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
                 debug_packet("RX", &packet);
                 switch (GET_TYPE(packet.size_seq_type)) {
                     case PKT_DATA:
-                        uint16_t recv_seq = GET_SEQUENCE(packet.size_seq_type);
+                        uint8_t recv_seq = GET_SEQUENCE(packet.size_seq_type);
                         if (SEQ_DIFF(recv_seq, expected_seq) != 0) {
                             fprintf(stderr, "Sequence mismatch: expected %d, got %d\n",
                                     expected_seq, recv_seq);
@@ -300,7 +308,7 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
                             return 1;
                         }
 
-                        expected_seq = (recv_seq + 1) & SEQ_MASK;
+                        expected_seq = (recv_seq + 1) & SEQ_NUM_MAX;
                         transfer_update_stats(&stats, GET_SIZE(packet.size_seq_type), recv_seq);
 
                         float progress = (float)(stats.total_received * 100.0) / total_size;
@@ -311,6 +319,7 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
                         ack.start_marker = START_MARKER;
                         SET_TYPE(ack.size_seq_type, PKT_OK);
                         SET_SEQUENCE(ack.size_seq_type, GET_SEQUENCE(packet.size_seq_type));
+                        SET_SIZE(ack.size_seq_type, 0);
                         send_packet(socket, &ack, addr);
                         break;
                     case PKT_END_TX:
@@ -352,9 +361,10 @@ void verify_file(int socket, char *filename, struct sockaddr_ll *addr) {
     Packet packet = {0};
     packet.start_marker = START_MARKER;
     SET_TYPE(packet.size_seq_type, PKT_VERIFY);
+    SET_SEQUENCE(packet.size_seq_type, 0);
+    SET_SIZE(packet.size_seq_type, strlen(filename));
     strncpy(packet.data, filename, MAX_DATA_SIZE - 1);
     packet.data[MAX_DATA_SIZE - 1] = '\0';
-    SET_SIZE(packet.size_seq_type, strlen(packet.data));
     send_packet(socket, &packet, addr);
 
     if (receive_packet(socket, &packet, addr) > 0) {

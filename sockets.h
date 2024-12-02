@@ -49,39 +49,46 @@
 #define MAX_RETRIES 5
 #define RETRY_DELAY_MS 500      // 500 milliseconds
 
-// Masks and shifts
-#define SIZE_MASK 0xFC00  // Bits 15-10 (6 bits)
-#define SIZE_SHIFT 10
+// Masks for the fields in size_seq_type
+#define SIZE_MASK       0xFC00  // Bits 15-10 (6 bits)
+#define SIZE_SHIFT      10
 
-#define SEQ_MASK  0x03E0  // Bits 9-5 (5 bits)
-#define SEQ_SHIFT 5
+#define SEQ_FIELD_MASK  0x03E0  // Bits 9-5 (5 bits)
+#define SEQ_SHIFT       5
 
-#define TYPE_MASK 0x001F  // Bits 4-0 (5 bits)
-#define TYPE_SHIFT 0
+#define TYPE_MASK       0x001F  // Bits 4-0 (5 bits)
+#define TYPE_SHIFT      0
 
-#define GET_SIZE(sst) (((sst) & SIZE_MASK) >> SIZE_SHIFT)
-#define GET_SEQUENCE(sst) (((sst) & SEQ_MASK) >> SEQ_SHIFT)
-#define GET_TYPE(sst) (((sst) & TYPE_MASK) >> TYPE_SHIFT)
+// Maximum values for fields
+#define SIZEFIELD_MAX        0x3F    // 6 bits
+#define SEQ_NUM_MAX     0x1F    // 5 bits
+#define TYPE_MAX        0x1F    // 5 bits
 
+// Macros for setting fields
 #define SET_SIZE(sst, size) \
-    ((sst) = ((sst) & ~SIZE_MASK) | (((size) & 0x3F) << SIZE_SHIFT))
+    ((sst) = ((sst) & ~SIZE_MASK) | (((size) & SIZEFIELD_MAX) << SIZE_SHIFT))
 
-#define SET_SEQUENCE(sst, sequence) \
-    ((sst) = ((sst) & ~SEQ_MASK) | (((sequence) & 0x1F) << SEQ_SHIFT))
+#define SET_SEQUENCE(sst, seq) \
+    ((sst) = ((sst) & ~SEQ_FIELD_MASK) | (((seq) & SEQ_NUM_MAX) << SEQ_SHIFT))
 
 #define SET_TYPE(sst, type) \
-    ((sst) = ((sst) & ~TYPE_MASK) | (((type) & 0x1F) << TYPE_SHIFT))
+    ((sst) = ((sst) & ~TYPE_MASK) | (((type) & TYPE_MAX) << TYPE_SHIFT))
+
+// Macros for getting fields
+#define GET_SIZE(sst)      (((sst) & SIZE_MASK) >> SIZE_SHIFT)
+#define GET_SEQUENCE(sst)  (((sst) & SEQ_FIELD_MASK) >> SEQ_SHIFT)
+#define GET_TYPE(sst)      (((sst) & TYPE_MASK) >> TYPE_SHIFT)
 
 #define SEQ_MAX 0x1F // 5 bits
 
 // Update sequence difference macro
-#define SEQ_DIFF(a, b) ((uint8_t)((a) - (b)) & SEQ_MAX)
+#define SEQ_DIFF(a, b) (((a) - (b)) & SEQ_NUM_MAX)
 
-// Update sequence comparison macros
-#define SEQ_LT(a, b)   (SEQ_DIFF(a, b) > (SEQ_MAX / 2))
-#define SEQ_GT(a, b)   (SEQ_DIFF(b, a) > (SEQ_MAX / 2))
+#define SEQ_LT(a, b)   (SEQ_DIFF(a, b) > (SEQ_NUM_MAX / 2))
+#define SEQ_GT(a, b)   (SEQ_DIFF(b, a) > (SEQ_NUM_MAX / 2))
 #define SEQ_LEQ(a, b)  (!SEQ_GT(a, b))
 #define SEQ_GEQ(a, b)  (!SEQ_LT(a, b))
+
 
 #pragma pack(push, 1)
 struct Packet {
@@ -97,7 +104,7 @@ typedef struct Packet Packet;
 // Function declarations
 uint8_t calculate_crc(Packet *packet);
 int send_packet(int socket, Packet *packet, struct sockaddr_ll *addr);
-int receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr);
+ssize_t receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr);
 void send_ack(int socket, struct sockaddr_ll *addr, uint8_t type);
 void send_error(int socket, struct sockaddr_ll *addr, uint8_t error_code);
 int set_socket_timeout(int socket, int timeout_ms);
