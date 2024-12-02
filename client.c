@@ -4,7 +4,6 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <ctype.h>
-#include <arpa/inet.h> // For htons and ntohs
 
 void backup_file(int socket, char *filename, struct sockaddr_ll *addr);
 int restore_file(int socket, char *filename, struct sockaddr_ll *addr);

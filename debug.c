@@ -5,7 +5,7 @@
 #include <string.h>
 #include <sys/time.h>
 
-int debug_level = DBG_LEVEL_INFO;  // Default level
+int debug_level = DBG_LEVEL_TRACE;  // Default level
 
 static struct timeval start_time;
 
@@ -71,8 +71,11 @@ void debug_packet(const char *prefix, const struct Packet *packet) {
 
     if (debug_level >= DBG_LEVEL_TRACE) {
         debug_hex_dump("  ", packet->data, len);
+        // Additionally, dump the entire Packet
+        debug_hex_dump("  Full Packet: ", packet, sizeof(Packet));
     }
 }
+
 
 
 void transfer_init_stats(struct TransferStats *stats, size_t expected_size) {

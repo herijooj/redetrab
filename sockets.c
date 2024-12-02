@@ -140,7 +140,6 @@ int validate_packet(Packet *packet) {
 int send_packet(int socket, Packet *packet, struct sockaddr_ll *addr) {
     packet->start_marker = START_MARKER;
     packet->crc = calculate_crc(packet);
-    // do not convert size_seq_type to network byte order before sending
     packet->size_seq_type = packet->size_seq_type;
 
     debug_packet("TX", packet);
@@ -170,7 +169,6 @@ ssize_t receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr) {
             continue;
         }
 
-        // Convert size_seq_type from network to host byte order after receiving
         packet->size_seq_type = packet->size_seq_type;
 
         if (validate_packet(packet) < 0) {
