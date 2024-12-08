@@ -366,18 +366,22 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
                 
                 if (GET_TYPE(packet.size_seq_type) == PKT_DATA) {
                     uint8_t recv_seq = GET_SEQUENCE(packet.size_seq_type);
+                    size_t data_size = GET_SIZE(packet.size_seq_type);
                     
                     // Only update stats if sequence is valid
                     if (recv_seq == stats.expected_seq || 
                         (recv_seq == 0 && stats.expected_seq == SEQ_NUM_MAX)) {
                         
-                        if (write(fd, packet.data, GET_SIZE(packet.size_seq_type)) < 0) {
+                        if (write(fd, packet.data, data_size) < 0) {
                             fprintf(stderr, "Write error\n");
                             close(fd);
                             return 1;
                         }
 
-                        transfer_update_stats(&stats, GET_SIZE(packet.size_seq_type), recv_seq);
+                        // Update total received bytes first
+                        stats.total_received += data_size;
+                        // Then update sequence tracking
+                        transfer_update_stats(&stats, 0, recv_seq); // Don't add bytes here since we did it above
                         
                         float progress = (float)(stats.total_received * 100.0) / total_size;
                         DBG_INFO("Progress: %.1f%% (%lu/%lu bytes)\n",
@@ -397,13 +401,39 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
                         // Don't update stats for invalid sequence
                         continue;
                     }
+                } else if (GET_TYPE(packet.size_seq_type) == PKT_END_TX) {
+                    if (stats.total_received == total_size) {
+                        print_transfer_summary(&stats);
+                        DBG_INFO("Transfer completed successfully\n");
+                        close(fd);
+                        return 0;
+                    } else {
+                        DBG_ERROR("Received END_TX but transfer incomplete (%lu/%lu bytes)\n",
+                                 stats.total_received, total_size);
+                        close(fd);
+                        return 1;
+                    }
                 }
-                // ...existing code for other packet types...
             }
-            print_transfer_summary(&stats);
-            DBG_INFO("Transfer completed successfully\n");
+
+            // Wait for final END_TX
+            int retries = 0;
+            while (retries < MAX_RETRIES) {
+                if (receive_packet(socket, &packet, addr, false) > 0) {
+                    if (GET_TYPE(packet.size_seq_type) == PKT_END_TX) {
+                        print_transfer_summary(&stats);
+                        DBG_INFO("Transfer completed successfully\n");
+                        close(fd);
+                        return 0;
+                    }
+                }
+                retries++;
+                usleep(RETRY_DELAY_MS * 1000);
+            }
+
+            DBG_ERROR("Never received END_TX packet\n");
             close(fd);
-            return 0;
+            return 1;
         }
     }
 
