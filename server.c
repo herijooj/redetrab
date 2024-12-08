@@ -92,21 +92,9 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
         return;
     }
 
-    // Update total_received only once after successful write
+    // Update stats with actual written bytes
     stats->total_received += written;
-
-    // Remove redundant updates
-    // stats->packets_processed++; // Already done in transfer_update_stats
-    // stats->last_sequence = recv_seq; // Already done in transfer_update_stats
-    // stats->expected_seq = (recv_seq + 1) & SEQ_NUM_MAX; // Already done in transfer_update_stats
-
-    DBG_INFO("Updated stats - received: %zu/%zu bytes, packets: %zu\n", stats->total_received, stats->total_expected, stats->packets_processed);
-
-    float progress = (float)(stats->total_received * 100.0) / stats->total_expected;
-    DBG_INFO("Progress: %.1f%% (%zu/%zu bytes)\n", progress, stats->total_received, stats->total_expected);
-
-    // Add transfer progress debugging
-    debug_transfer_progress(stats, packet);
+    transfer_update_stats(stats, 0, recv_seq);  // Don't add bytes here
 
     // Send ACK with Correct Sequence Number
     Packet ack = {0};
@@ -114,8 +102,11 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
     SET_TYPE(ack.size_seq_type, PKT_OK);
     SET_SEQUENCE(ack.size_seq_type, recv_seq);
     SET_SIZE(ack.size_seq_type, 0);
-    ack.crc = calculate_crc(&ack); // is_send = true
+    ack.crc = calculate_crc(&ack);
     send_packet(socket, &ack, addr, true);
+
+    // Add progress debugging
+    debug_transfer_progress(stats, packet);
 }
 
 void handle_backup(int socket, Packet *packet, struct sockaddr_ll *addr, struct TransferStats *stats) {

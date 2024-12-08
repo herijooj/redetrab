@@ -61,6 +61,16 @@ typedef enum {
     CRC_MAX_ERRORS = 3
 } ProtocolConstants;
 
+typedef enum {
+    MIN_PACKET_LENGTH = 67,    // Minimum expected packet length (header + CRC)
+    MAX_PACKET_LENGTH = 67     // Maximum expected packet length (header + data + CRC + padding)
+} PacketLengths;
+
+typedef enum {
+    INITIAL_SEQUENCE = 0,
+    INITIAL_SIZE = 0
+} ProtocolInitialValues;
+
 // Field masks and limits
 typedef enum {
     SIZE_MASK = 0xFC00,
@@ -122,6 +132,7 @@ typedef enum {
 #define VALIDATE_SEQUENCE(seq) ((seq) <= SEQ_NUM_MAX)
 #define VALIDATE_SIZE(size) ((size) <= MAX_DATA_SIZE)
 #define VALIDATE_TYPE(type) ((type) <= TYPE_MAX)
+#define VALIDATE_PACKET_LENGTH(len) ((len) >= MIN_PACKET_LENGTH && (len) <= MAX_PACKET_LENGTH)
 
 #pragma pack(push, 1)
 #define PAD_SIZE ((64 > (sizeof(uint8_t) + sizeof(uint16_t) + MAX_DATA_SIZE + sizeof(uint8_t))) ? (64 - sizeof(uint8_t) - sizeof(uint16_t) - MAX_DATA_SIZE - sizeof(uint8_t)) : 0)
@@ -152,6 +163,8 @@ int validate_packet(Packet *packet, bool is_send);
 int validate_packet_fields(Packet *packet);
 uint8_t calculate_crc_robust(const Packet *packet, bool is_send);
 int validate_crc(const Packet *packet);
+void init_packet_sequence(struct Packet *packet);
+int validate_sequence_order(uint8_t received, uint8_t expected);
 
 struct PacketStats {
     uint64_t total_bytes;       // Changed from size_t

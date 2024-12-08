@@ -135,10 +135,13 @@ void debug_packet_validation(const struct Packet *packet, uint8_t computed_crc) 
     if (debug_level < DBG_LEVEL_INFO) return;
     
     if (packet->crc != computed_crc) {
-        DBG_ERROR("CRC error: got=0x%02x comp=0x%02x seq=%u type=%s\n",
-                 packet->crc, computed_crc, 
-                 GET_SEQUENCE(packet->size_seq_type),
-                 packet_type_to_string(GET_TYPE(packet->size_seq_type)));
+        DBG_ERROR("CRC error details:\n");
+        DBG_ERROR("  Computed CRC: 0x%02x\n", computed_crc);
+        DBG_ERROR("  Received CRC: 0x%02x\n", packet->crc);
+        DBG_ERROR("  Sequence: %u\n", GET_SEQUENCE(packet->size_seq_type));
+        DBG_ERROR("  Type: %s\n", packet_type_to_string(GET_TYPE(packet->size_seq_type)));
+        DBG_ERROR("  Size field: %u\n", GET_SIZE(packet->size_seq_type));
+        debug_hex_dump("  Raw packet: ", packet, sizeof(Packet));
     }
 }
 
@@ -175,7 +178,7 @@ void transfer_handle_wrap(struct TransferStats *stats) {
 }
 
 void transfer_update_stats(struct TransferStats *stats, size_t bytes, uint8_t seq) {
-    // Don't update total_received here, let the caller do it
+    // Don't update total_received here - let the caller handle it
     stats->packets_processed++;
     
     // Check for wrap-around

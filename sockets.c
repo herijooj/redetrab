@@ -153,7 +153,7 @@ void send_error(int socket, struct sockaddr_ll *addr, uint8_t error_code, bool i
 int send_packet(int socket, Packet *packet, struct sockaddr_ll *addr, bool is_send) {
     DBG_TRACE("Entering send_packet (socket=%d, is_send=%d)\n", socket, is_send);
     // Recalculate CRC to ensure integrity
-    packet->crc = calculate_crc(packet);
+    packet->crc = calculate_crc(packet);  // Corrected line
     
     debug_packet("TX", packet);
     DBG_TRACE("Packet type=%d, sequence=%d, size=%d\n", 
@@ -252,8 +252,16 @@ ssize_t receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr, boo
         
         if (received > 0) {
             DBG_TRACE("Received %zd bytes\n", received);
+            
+            // Add packet length validation
+            if (!VALIDATE_PACKET_LENGTH(received)) {
+                DBG_ERROR("Invalid packet length: received=%zd, expected=%d-%d\n",
+                         received, MIN_PACKET_LENGTH, MAX_PACKET_LENGTH);
+                send_error(socket, addr, ERR_SEQUENCE, is_send);
+                continue;
+            }
         }
-        
+
         if (received <= 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 DBG_TRACE("Socket timeout\n");
@@ -268,8 +276,9 @@ ssize_t receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr, boo
             continue;
         }
 
+        // Before copying to packet, ensure we copy the full size
         memset(packet, 0, sizeof(Packet));
-        memcpy(packet, buffer, received);
+        memcpy(packet, buffer, sizeof(Packet));  // Changed from 'received' to sizeof(Packet)
         
         DBG_TRACE("Pre-validation: marker=0x%02x, type=%d, seq=%d, size=%d\n",
                   packet->start_marker,
@@ -292,9 +301,16 @@ ssize_t receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr, boo
                 usleep(CRC_ERROR_BACKOFF_MS * 1000);
             }
         }
+
+        if (GET_TYPE(packet->size_seq_type) == PKT_DATA) {
+            uint8_t recv_seq = GET_SEQUENCE(packet->size_seq_type);
+            DBG_TRACE("Received DATA packet with seq=%u\n", recv_seq);
+            
+            // Log sequence validation
+            debug_packet_validation(packet, packet->crc);
+        }
     }
     
-    DBG_ERROR("Max consecutive CRC errors reached\n");
     return -1;
 }
 
@@ -337,4 +353,23 @@ void update_packet_stats(struct PacketStats *stats, size_t bytes, int is_send) {
     } else {
         stats->packets_received++;
     }
+}
+
+void init_packet_sequence(struct Packet *packet) {
+    if (!packet) return;
+    SET_SEQUENCE(packet->size_seq_type, INITIAL_SEQUENCE);
+}
+
+int validate_sequence_order(uint8_t received, uint8_t expected) {
+    if (received == expected) return 0;
+    
+    // Handle wrap-around case
+    if (expected == 0 && received == SEQ_NUM_MAX) return 0;
+    
+    // Check if sequence is within valid range
+    int diff = SEQ_DIFF(received, expected);
+    if (diff <= SEQ_NUM_MAX/2) return 0;
+    
+    DBG_ERROR("Invalid sequence order: received=%u expected=%u\n", received, expected);
+    return -1;
 }

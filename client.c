@@ -230,14 +230,15 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
                     if (received_type == PKT_OK) {
                         uint8_t received_seq = GET_SEQUENCE(packet.size_seq_type);
                         if (received_seq == seq) {
-                            // ACK received, proceed to next chunk
-                            transfer_update_stats(&stats, bytes, false);
+                            // Update stats first with actual bytes sent
+                            stats.total_received += bytes;
+                            transfer_update_stats(&stats, 0, seq);  // Don't add bytes here
+                            
                             seq = (seq + 1) & SEQ_NUM_MAX;
                             chunk_sent = true;
-                            float progress = (float)(stats.total_received * 100.0) / total_size;
-                            DBG_INFO("Progress: %.1f%% (%lu/%lu bytes, seq: %u, wraps: %u)\n",
-                                    progress, stats.total_received, total_size,
-                                    seq, stats.wrap_count);
+                            
+                            // Update and display progress
+                            debug_transfer_progress(&stats, &data_packet);
                         } else {
                             // Unexpected sequence number
                             DBG_WARN("Unexpected ACK sequence: expected %d, got %d\n", seq, received_seq);

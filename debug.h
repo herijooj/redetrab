@@ -46,6 +46,10 @@ struct TransferStats {
         uint8_t last_valid_crc;        // Last valid CRC received
         uint8_t last_computed_crc;     // Last computed CRC
         uint8_t last_error_sequence;   // Sequence number when error occurred
+        size_t last_error_packet_size;  // Size of packet when error occurred
+        uint8_t error_packet_buffer[67]; // Buffer to store problematic packet
+        uint8_t initial_sequence;     // Track initial sequence number
+        uint8_t last_valid_sequence;  // Last successfully validated sequence
     } error_details;
 };
 
