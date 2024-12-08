@@ -51,6 +51,7 @@ int cria_raw_socket(char *nome_interface_rede) {
         DBG_ERROR("Error creating socket: Root privileges required!\n");
         exit(-1);
     }
+    DBG_TRACE("Socket created successfully with fd=%d\n", soquete);
 
     struct sockaddr_ll endereco;
     if (get_interface_info(soquete, nome_interface_rede, &endereco) < 0) {
@@ -92,21 +93,16 @@ int set_socket_timeout(int socket, int timeout_ms) {
     return 0;
 }
 
-// Function to calculate CRC (robust with context)
-uint8_t calculate_crc_robust(const Packet *packet, bool is_send) {
-    uint8_t crc = 0;
-    uint16_t size_seq_type_net = is_send ? htons(packet->size_seq_type) : packet->size_seq_type;
+// Simplified CRC calculation
+uint8_t calculate_crc(const Packet *packet) {
+    if (!packet) return 0;
     
-    DBG_TRACE("Calculating CRC. is_send=%d\n", is_send);
-    DBG_TRACE("size_seq_type before htons: 0x%04x\n", packet->size_seq_type);
-    if (is_send) {
-        DBG_TRACE("size_seq_type after htons: 0x%04x\n", size_seq_type_net);
-    }
+    uint8_t crc = 0;
     
     // Include start_marker and size_seq_type
     crc ^= packet->start_marker;
-    crc ^= (size_seq_type_net >> 8) & 0xFF;
-    crc ^= size_seq_type_net & 0xFF;
+    crc ^= (packet->size_seq_type >> 8) & 0xFF;
+    crc ^= packet->size_seq_type & 0xFF;
     
     // Get the actual data size
     uint8_t size = GET_SIZE(packet->size_seq_type);
@@ -123,11 +119,11 @@ uint8_t calculate_crc_robust(const Packet *packet, bool is_send) {
     return crc;
 }
 
-// Function to validate CRC
-int validate_crc(const Packet *packet, bool is_send) {
+// Simplified CRC validation
+int validate_crc(const Packet *packet) {
     if (!packet) return 0;
-    uint8_t computed = calculate_crc_robust(packet, is_send);
-    return VALIDATE_CRC(computed, packet->crc);
+    uint8_t computed = calculate_crc(packet);
+    return computed == packet->crc;
 }
 
 // Function to send acknowledgment
@@ -137,7 +133,7 @@ void send_ack(int socket, struct sockaddr_ll *addr, uint8_t type, bool is_send) 
     SET_TYPE(ack.size_seq_type, type);
     SET_SEQUENCE(ack.size_seq_type, 0);
     SET_SIZE(ack.size_seq_type, 0);
-    ack.crc = calculate_crc_robust(&ack, is_send);
+    ack.crc = calculate_crc(&ack);
     send_packet(socket, &ack, addr, is_send);
 }
 
@@ -149,16 +145,21 @@ void send_error(int socket, struct sockaddr_ll *addr, uint8_t error_code, bool i
     SET_SEQUENCE(error.size_seq_type, 0);
     SET_SIZE(error.size_seq_type, 1);
     error.data[0] = error_code;
-    error.crc = calculate_crc_robust(&error, is_send);
+    error.crc = calculate_crc(&error);
     send_packet(socket, &error, addr, is_send);
 }
 
 // Function to send a packet ensuring all bytes are sent
 int send_packet(int socket, Packet *packet, struct sockaddr_ll *addr, bool is_send) {
+    DBG_TRACE("Entering send_packet (socket=%d, is_send=%d)\n", socket, is_send);
     // Recalculate CRC to ensure integrity
-    packet->crc = calculate_crc_robust(packet, is_send);
+    packet->crc = calculate_crc(packet);
     
     debug_packet("TX", packet);
+    DBG_TRACE("Packet type=%d, sequence=%d, size=%d\n", 
+              GET_TYPE(packet->size_seq_type),
+              GET_SEQUENCE(packet->size_seq_type),
+              GET_SIZE(packet->size_seq_type));
 
     memset(packet->padding, 0, PAD_SIZE);
 
@@ -167,12 +168,15 @@ int send_packet(int socket, Packet *packet, struct sockaddr_ll *addr, bool is_se
     uint8_t *buffer = (uint8_t*)packet;
 
     while (total_sent < packet_size) {
+        DBG_TRACE("Attempting to send %zd bytes (total_sent=%zd)\n", 
+                  packet_size - total_sent, total_sent);
         ssize_t sent = sendto(socket, buffer + total_sent, packet_size - total_sent, 0,
                               (struct sockaddr *)addr, sizeof(*addr));
         if (sent < 0) {
             DBG_ERROR("sendto failed: %s\n", strerror(errno));
             return -1;
         }
+        DBG_TRACE("Sent %zd bytes in this iteration\n", sent);
         total_sent += sent;
     }
 
@@ -220,7 +224,7 @@ int validate_packet(Packet *packet, bool is_send) {
     }
     
     // Final CRC validation
-    uint8_t computed_crc = calculate_crc_robust(packet, is_send);
+    uint8_t computed_crc = calculate_crc(packet);
     debug_packet_validation(packet, computed_crc);
     
     if (packet->crc != computed_crc) {
@@ -235,13 +239,20 @@ int validate_packet(Packet *packet, bool is_send) {
 
 // Function to receive a packet with context
 ssize_t receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr, bool is_send) {
+    DBG_TRACE("Entering receive_packet (socket=%d, is_send=%d)\n", socket, is_send);
     socklen_t addr_len = sizeof(*addr);
     uint8_t buffer[sizeof(Packet)];
     int consecutive_crc_errors = 0;
     
     while (consecutive_crc_errors < MAX_CONSECUTIVE_CRC_ERRORS) {
+        DBG_TRACE("Waiting for packet (attempt %d/%d)\n", 
+                  consecutive_crc_errors + 1, MAX_CONSECUTIVE_CRC_ERRORS);
         ssize_t received = recvfrom(socket, buffer, sizeof(buffer), 0, 
                                   (struct sockaddr *)addr, &addr_len);
+        
+        if (received > 0) {
+            DBG_TRACE("Received %zd bytes\n", received);
+        }
         
         if (received <= 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -259,6 +270,12 @@ ssize_t receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr, boo
 
         memset(packet, 0, sizeof(Packet));
         memcpy(packet, buffer, received);
+        
+        DBG_TRACE("Pre-validation: marker=0x%02x, type=%d, seq=%d, size=%d\n",
+                  packet->start_marker,
+                  GET_TYPE(packet->size_seq_type),
+                  GET_SEQUENCE(packet->size_seq_type),
+                  GET_SIZE(packet->size_seq_type));
 
         int validation_result = validate_packet(packet, is_send);
         if (validation_result == 0) {
@@ -283,11 +300,14 @@ ssize_t receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr, boo
 
 // Function to send acknowledgment with correct context
 int wait_for_ack(int socket, Packet *packet, struct sockaddr_ll *addr, uint8_t expected_type) {
+    DBG_TRACE("Entering wait_for_ack (socket=%d, expected_type=%d)\n", socket, expected_type);
     int retries = 0;
 
     while (retries < MAX_RETRIES) {
+        DBG_TRACE("Waiting for ACK (attempt %d/%d)\n", retries + 1, MAX_RETRIES);
         if (receive_packet(socket, packet, addr, false) > 0) { // is_send = false
             uint8_t received_type = GET_TYPE(packet->size_seq_type);
+            DBG_TRACE("Received packet type=%d (expected=%d)\n", received_type, expected_type);
             if (received_type == expected_type) {
                 return 0;
             }
@@ -300,6 +320,7 @@ int wait_for_ack(int socket, Packet *packet, struct sockaddr_ll *addr, uint8_t e
         DBG_WARN("Timeout waiting for ACK, retry %d/%d\n", retries, MAX_RETRIES);
         usleep(RETRY_DELAY_MS * 1000);
     }
+    DBG_ERROR("Failed to receive ACK after %d retries\n", MAX_RETRIES);
     return -1;
 }
 

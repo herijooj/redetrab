@@ -111,12 +111,12 @@ typedef enum {
 #define SEQ_MAX 0x1F // 5 bits
 
 // Update sequence difference macro
-#define SEQ_DIFF(a, b) (((a) - (b)) & SEQ_NUM_MAX)
+#define SEQ_DIFF(a, b) ((((a) - (b)) + SEQ_NUM_MAX + 1) & SEQ_NUM_MAX)
 
-#define SEQ_LT(a, b)   (SEQ_DIFF(a, b) > (SEQ_NUM_MAX / 2))
-#define SEQ_GT(a, b)   (SEQ_DIFF(b, a) > (SEQ_NUM_MAX / 2))
-#define SEQ_LEQ(a, b)  (!SEQ_GT(a, b))
-#define SEQ_GEQ(a, b)  (!SEQ_LT(a, b))
+#define SEQ_LT(a, b)   (SEQ_DIFF((a), (b)) > (SEQ_NUM_MAX/2))
+#define SEQ_GT(a, b)   (SEQ_DIFF((b), (a)) > (SEQ_NUM_MAX/2))
+#define SEQ_LEQ(a, b)  (!SEQ_GT((a), (b)))
+#define SEQ_GEQ(a, b)  (!SEQ_LT((a), (b)))
 
 // Add validation macros
 #define VALIDATE_SEQUENCE(seq) ((seq) <= SEQ_NUM_MAX)
@@ -139,7 +139,7 @@ struct Packet {
 typedef struct Packet Packet;
 
 // Function declarations
-uint8_t calculate_crc(Packet *packet);
+uint8_t calculate_crc(const Packet *packet);
 int send_packet(int socket, Packet *packet, struct sockaddr_ll *addr, bool is_send);
 ssize_t receive_packet(int socket, Packet *packet, struct sockaddr_ll *addr, bool is_send);
 void send_ack(int socket, struct sockaddr_ll *addr, uint8_t type, bool is_send);
@@ -151,7 +151,7 @@ int cria_raw_socket(char *nome_interface_rede);
 int validate_packet(Packet *packet, bool is_send);
 int validate_packet_fields(Packet *packet);
 uint8_t calculate_crc_robust(const Packet *packet, bool is_send);
-int validate_crc(const Packet *packet, bool is_send);  // Updated declaration
+int validate_crc(const Packet *packet);
 
 struct PacketStats {
     uint64_t total_bytes;       // Changed from size_t

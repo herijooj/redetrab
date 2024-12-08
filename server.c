@@ -60,25 +60,28 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
 
     DBG_INFO("DATA packet: seq=%d/%d, len=%zu, total=%zu/%zu\n", GET_SEQUENCE(packet->size_seq_type), stats->expected_seq, data_len, stats->total_received, stats->total_expected);
 
-    // Corrected Sequence Number Extraction
-    uint8_t recv_seq = GET_SEQUENCE(packet->size_seq_type) & SEQ_NUM_MAX;
-    uint8_t exp_seq = stats->expected_seq & SEQ_NUM_MAX;
+    // Sequence Number Handling
+    uint8_t recv_seq = GET_SEQUENCE(packet->size_seq_type);
+    uint8_t exp_seq = stats->expected_seq;
 
     // Add detailed validation debugging
-    uint8_t computed_crc = calculate_crc_robust(packet, false); // is_send = false
+    uint8_t computed_crc = calculate_crc(packet);
     debug_packet_validation(packet, computed_crc);
 
-    // Sequence validation
+    // Sequence validation with wrap-around handling
     if (recv_seq != exp_seq) {
-        debug_sequence_error(stats, recv_seq);
-        if (recv_seq == 0 && exp_seq == SEQ_NUM_MAX) {
-            transfer_handle_wrap(stats);
+        if ((recv_seq == 0 && exp_seq == SEQ_NUM_MAX) || 
+            SEQ_DIFF(recv_seq, exp_seq) <= SEQ_NUM_MAX/2) {
+            // Valid sequence progression
+            transfer_update_stats(stats, data_len, recv_seq);
         } else {
-            DBG_ERROR("Sequence mismatch: expected %d, got %d (wrap count: %u)\n", exp_seq, recv_seq, stats->wrap_count);
+            debug_sequence_error(stats, recv_seq);
             stats->had_errors = 1;
             send_error(socket, addr, ERR_SEQUENCE, true);
             return;
         }
+    } else {
+        transfer_update_stats(stats, data_len, recv_seq);
     }
 
     ssize_t written = write(fd, packet->data, data_len);
@@ -89,10 +92,13 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
         return;
     }
 
+    // Update total_received only once after successful write
     stats->total_received += written;
-    stats->packets_processed++;
-    stats->last_sequence = recv_seq;
-    stats->expected_seq = (recv_seq + 1) & SEQ_NUM_MAX;
+
+    // Remove redundant updates
+    // stats->packets_processed++; // Already done in transfer_update_stats
+    // stats->last_sequence = recv_seq; // Already done in transfer_update_stats
+    // stats->expected_seq = (recv_seq + 1) & SEQ_NUM_MAX; // Already done in transfer_update_stats
 
     DBG_INFO("Updated stats - received: %zu/%zu bytes, packets: %zu\n", stats->total_received, stats->total_expected, stats->packets_processed);
 
@@ -108,7 +114,7 @@ void handle_data_packet(int socket, Packet *packet, int fd, struct sockaddr_ll *
     SET_TYPE(ack.size_seq_type, PKT_OK);
     SET_SEQUENCE(ack.size_seq_type, recv_seq);
     SET_SIZE(ack.size_seq_type, 0);
-    ack.crc = calculate_crc_robust(&ack, true); // is_send = true
+    ack.crc = calculate_crc(&ack); // is_send = true
     send_packet(socket, &ack, addr, true);
 }
 
@@ -314,7 +320,7 @@ int main(int argc, char *argv[]) {
                         SET_TYPE(end_tx_ack.size_seq_type, PKT_OK_CHSUM);
                         SET_SEQUENCE(end_tx_ack.size_seq_type, 0);
                         SET_SIZE(end_tx_ack.size_seq_type, 0);
-                        end_tx_ack.crc = calculate_crc_robust(&end_tx_ack, true); // is_send = true
+                        end_tx_ack.crc = calculate_crc(&end_tx_ack); // is_send = true
                         send_packet(socket_fd, &end_tx_ack, &client_addr, true);
                         DBG_INFO("Transfer completed successfully\n");
                     } else {

@@ -289,7 +289,7 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
         SET_TYPE(end_packet.size_seq_type, PKT_END_TX);
         SET_SEQUENCE(end_packet.size_seq_type, 0);
         SET_SIZE(end_packet.size_seq_type, 0);
-        end_packet.crc = calculate_crc_robust(&end_packet, true); // is_send = true
+        end_packet.crc = calculate_crc(&end_packet); // is_send = true
 
         int retries = 0;
         bool end_tx_sent = false;
@@ -347,6 +347,7 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
 
             struct TransferStats stats;
             transfer_init_stats(&stats, total_size);
+            stats.expected_seq = 0; // Explicitly initialize expected sequence
 
             int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (fd < 0) {
@@ -354,82 +355,50 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
                 return 1;
             }
 
-            uint8_t expected_seq = 0;
-
             while (stats.total_received < total_size) {
-                if (receive_packet(socket, &packet, addr, false) <= 0) {  // Add is_send = false
+                if (receive_packet(socket, &packet, addr, false) <= 0) {
                     fprintf(stderr, "No response from server\n");
                     close(fd);
                     return 1;
                 }
                 debug_packet("RX", &packet);
-                switch (GET_TYPE(packet.size_seq_type)) {
-                    case PKT_DATA:
-                        uint8_t recv_seq = GET_SEQUENCE(packet.size_seq_type);
-                        // Remove the strict sequence check and use SEQ_DIFF macro
-                        if (recv_seq != expected_seq) {
-                            if (recv_seq == 0 && expected_seq == SEQ_NUM_MAX) {
-                                // Handle sequence number wrap-around
-                                stats.wrap_count++;
-                            } else {
-                                DBG_WARN("Unexpected sequence: got %d, expected %d (wraps: %u)\n",
-                                        recv_seq, expected_seq, stats.wrap_count);
-                            }
-                        }
-
+                
+                if (GET_TYPE(packet.size_seq_type) == PKT_DATA) {
+                    uint8_t recv_seq = GET_SEQUENCE(packet.size_seq_type);
+                    
+                    // Only update stats if sequence is valid
+                    if (recv_seq == stats.expected_seq || 
+                        (recv_seq == 0 && stats.expected_seq == SEQ_NUM_MAX)) {
+                        
                         if (write(fd, packet.data, GET_SIZE(packet.size_seq_type)) < 0) {
                             fprintf(stderr, "Write error\n");
                             close(fd);
                             return 1;
                         }
 
-                        expected_seq = (recv_seq + 1) & SEQ_NUM_MAX;
                         transfer_update_stats(&stats, GET_SIZE(packet.size_seq_type), recv_seq);
-
+                        
                         float progress = (float)(stats.total_received * 100.0) / total_size;
                         DBG_INFO("Progress: %.1f%% (%lu/%lu bytes)\n",
                                  progress, stats.total_received, total_size);
 
+                        // Send ACK with received sequence number
                         Packet ack = {0};
                         ack.start_marker = START_MARKER;
                         SET_TYPE(ack.size_seq_type, PKT_OK);
-                        SET_SEQUENCE(ack.size_seq_type, recv_seq);  // Use received sequence number
+                        SET_SEQUENCE(ack.size_seq_type, recv_seq);
                         SET_SIZE(ack.size_seq_type, 0);
-                        send_packet(socket, &ack, addr, true);  // Add is_send = true
-                        break;
-                    case PKT_END_TX:
-                        SET_TYPE(packet.size_seq_type, PKT_OK_CHSUM);
-                        send_packet(socket, &packet, addr, true);  // Add is_send = true
-                        print_transfer_summary(&stats);
-                        DBG_INFO("Transfer completed successfully\n");
-                        close(fd);
-                        return 0;
-                    case PKT_ERROR:
-                        if (packet.data[0] == ERR_NOT_FOUND) {
-                            fprintf(stderr, "Error: File '%s' not found in server backup.\n", filename);
-                        } else {
-                            fprintf(stderr, "Error: Received error code %d\n", packet.data[0]);
-                        }
-                        close(fd);
-                        return 1;
-                    case PKT_NACK:
-                        fprintf(stderr, "Transfer failed\n");
-                        close(fd);
-                        return 1;
-                }
-                debug_packet_validation(&packet, calculate_crc_robust(&packet, false));  // Add is_send = false
-                
-                if (GET_TYPE(packet.size_seq_type) == PKT_DATA) {
-                    uint8_t recv_seq = GET_SEQUENCE(packet.size_seq_type);
-                    if (SEQ_DIFF(recv_seq, expected_seq) != 0) {
+                        ack.crc = calculate_crc(&ack);
+                        send_packet(socket, &ack, addr, true);
+                        
+                    } else {
                         debug_sequence_error(&stats, recv_seq);
+                        // Don't update stats for invalid sequence
+                        continue;
                     }
-                    
-                    // Add progress debugging
-                    debug_transfer_progress(&stats, &packet);
                 }
+                // ...existing code for other packet types...
             }
-
             print_transfer_summary(&stats);
             DBG_INFO("Transfer completed successfully\n");
             close(fd);

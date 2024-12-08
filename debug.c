@@ -40,12 +40,7 @@ void debug_print(int level, const char *fmt, ...) {
     long elapsed = (now.tv_sec - start_time.tv_sec) * 1000 +
                   (now.tv_usec - start_time.tv_usec) / 1000;
 
-    // Add [S] for server or [C] for client prefix
-    #ifdef SERVER_MODE
-    fprintf(stderr, "[S %.3f] ", elapsed/1000.0);
-    #else
-    fprintf(stderr, "[C %.3f] ", elapsed/1000.0);
-    #endif
+    fprintf(stderr, "[%.3f] ", elapsed/1000.0);
 
     va_list args;
     va_start(args, fmt);
@@ -168,6 +163,8 @@ void debug_retransmission(const struct TransferStats *stats, uint8_t seq, int at
 void transfer_init_stats(struct TransferStats *stats, size_t expected_size) {
     memset(stats, 0, sizeof(struct TransferStats));
     stats->total_expected = expected_size;
+    stats->expected_seq = 0;  // Explicitly initialize expected sequence
+    stats->last_sequence = 0; // Explicitly initialize last sequence
 }
 
 void transfer_handle_wrap(struct TransferStats *stats) {
@@ -178,15 +175,16 @@ void transfer_handle_wrap(struct TransferStats *stats) {
 }
 
 void transfer_update_stats(struct TransferStats *stats, size_t bytes, uint8_t seq) {
-    stats->total_received += bytes;
+    // Don't update total_received here, let the caller do it
     stats->packets_processed++;
     
     // Check for wrap-around
-    if (seq < stats->last_sequence) {
+    if (seq < stats->last_sequence && stats->last_sequence > SEQ_NUM_MAX/2) {
         transfer_handle_wrap(stats);
     }
     
     stats->last_sequence = seq;
+    stats->expected_seq = (seq + 1) & SEQ_NUM_MAX;
 }
 
 void print_transfer_summary(const struct TransferStats *stats) {
