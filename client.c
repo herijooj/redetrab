@@ -1,9 +1,51 @@
+// client.c
 #include "sockets.h"
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <ctype.h>
+#include <limits.h>
+#include <errno.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+// Command types
+typedef enum {
+    CMD_INVALID = 0,
+    CMD_BACKUP,
+    CMD_RESTORE,
+    CMD_VERIFY
+} ClientCommand;
+
+// Client context structure
+typedef struct {
+    int socket;
+    ClientCommand cmd;
+    char filename[PATH_MAX];
+    struct sockaddr_ll addr;
+} ClientContext;
+
+// Function declarations
+void display_help(const char* program_name);
+int read_mac_from_config(const char* filename, unsigned char* mac);
+
+
+static ClientCommand parse_command(const char *cmd_str) {
+    if (strcmp(cmd_str, "backup") == 0) return CMD_BACKUP;
+    if (strcmp(cmd_str, "restaura") == 0) return CMD_RESTORE;
+    if (strcmp(cmd_str, "verifica") == 0) return CMD_VERIFY;
+    return CMD_INVALID;
+}
+
+// Initialize client context
+static void init_client_context(ClientContext *ctx, int socket, char *filename, ClientCommand cmd) {
+    memset(ctx, 0, sizeof(ClientContext));
+    ctx->socket = socket;
+    ctx->cmd = cmd;
+    strncpy(ctx->filename, filename, PATH_MAX - 1);
+}
 
 void backup_file(int socket, char *filename, struct sockaddr_ll *addr);
 int restore_file(int socket, char *filename, struct sockaddr_ll *addr);
@@ -54,7 +96,6 @@ int read_mac_from_config(const char *config_file, unsigned char *mac_addr) {
     fclose(file);
     return -1;
 }
-
 void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
     DBG_INFO("Starting backup of %s\n", filename);
 
@@ -95,6 +136,7 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
     DBG_INFO("File will be sent in %zu chunks\n", total_chunks);
 
     Packet packet = {0};
+    memset(packet.padding, 0, PAD_SIZE);
     packet.start_marker = START_MARKER;
     SET_TYPE(packet.size_seq_type, PKT_BACKUP);
     SET_SEQUENCE(packet.size_seq_type, 0);
@@ -103,7 +145,7 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
     size_t max_filename_len = MAX_DATA_SIZE - sizeof(size_t) - 1;
     if (strlen(base_filename) >= max_filename_len) {
         DBG_ERROR("Filename too long (max %zu chars): %s\n", max_filename_len - 1, base_filename);
-        fprintf(stderr, RED "Error: Filename exceeds maximum length\n" RESET);
+        fprintf(stderr, "Error: Filename exceeds maximum length\n");
         close(fd);
         return;
     }
@@ -112,7 +154,7 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
     memcpy(packet.data, base_filename, strlen(base_filename));
     *((size_t *)(packet.data + strlen(base_filename) + 1)) = total_size;
 
-    if (send_packet(socket, &packet, addr) < 0 ||
+    if (send_packet(socket, &packet, addr, true) < 0 ||
         wait_for_ack(socket, &packet, addr, PKT_ACK) != 0 ||
         wait_for_ack(socket, &packet, addr, PKT_OK_SIZE) != 0) {
         DBG_ERROR("Failed to initialize backup\n");
@@ -122,6 +164,7 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
 
     char buffer[MAX_DATA_SIZE];
     uint8_t seq = 0;
+    Packet data_packet = {0}; // Initialize outside the loop
 
     while (stats.total_received < total_size) {
         uint64_t to_read = total_size - stats.total_received;
@@ -138,7 +181,7 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
             SET_TYPE(error_packet.size_seq_type, PKT_ERROR);
             SET_SIZE(error_packet.size_seq_type, 1);
             error_packet.data[0] = ERR_NO_ACCESS;
-            send_packet(socket, &error_packet, addr);
+            send_packet(socket, &error_packet, addr, true);
 
             close(fd);
             return;
@@ -156,7 +199,7 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
             return;
         }
 
-        if (seq > SEQ_MAX) {
+        if (seq > SEQ_NUM_MAX) {
             DBG_ERROR("Sequence number overflow\n");
             close(fd);
             return;
@@ -169,48 +212,73 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
         int retries = 0;
         bool chunk_sent = false;
 
-        uint8_t current_seq = seq;
-        
         while (retries < MAX_RETRIES && !chunk_sent) {
-            Packet data_packet = {0};
+            // Prepare data packet
+            memset(&data_packet, 0, sizeof(Packet));
             data_packet.start_marker = START_MARKER;
             SET_TYPE(data_packet.size_seq_type, PKT_DATA);
-            SET_SEQUENCE(data_packet.size_seq_type, current_seq);
-            SET_SIZE(data_packet.size_seq_type, bytes & 0x3F);
+            SET_SEQUENCE(data_packet.size_seq_type, seq);
+            SET_SIZE(data_packet.size_seq_type, bytes & SIZEFIELD_MAX);
             memcpy(data_packet.data, buffer, bytes);
-
-            if (send_packet(socket, &data_packet, addr) >= 0) {
-                if (wait_for_ack(socket, &packet, addr, PKT_OK) == 0) {
-                    if (SEQ_DIFF(GET_SEQUENCE(packet.size_seq_type), current_seq) == 0) {
-                        transfer_update_stats(&stats, bytes, current_seq);
-                        seq = (current_seq + 1) & SEQ_NUM_MAX;
-                        
-                        if (seq == 0) {
-                            transfer_handle_wrap(&stats);
+            memset(data_packet.padding, 0, PAD_SIZE);
+            
+            // Send data packet with is_send = true
+            if (send_packet(socket, &data_packet, addr, true) >= 0) {
+                // Wait for ACK or ERROR with is_send = false
+                if (receive_packet(socket, &packet, addr, false) > 0) {
+                    uint8_t received_type = GET_TYPE(packet.size_seq_type);
+                    if (received_type == PKT_OK) {
+                        uint8_t received_seq = GET_SEQUENCE(packet.size_seq_type);
+                        if (received_seq == seq) {
+                            // ACK received, proceed to next chunk
+                            transfer_update_stats(&stats, bytes, false);
+                            seq = (seq + 1) & SEQ_NUM_MAX;
+                            chunk_sent = true;
+                            float progress = (float)(stats.total_received * 100.0) / total_size;
+                            DBG_INFO("Progress: %.1f%% (%lu/%lu bytes, seq: %u, wraps: %u)\n",
+                                    progress, stats.total_received, total_size,
+                                    seq, stats.wrap_count);
+                        } else {
+                            // Unexpected sequence number
+                            DBG_WARN("Unexpected ACK sequence: expected %d, got %d\n", seq, received_seq);
+                            retries++;
+                            usleep(RETRY_DELAY_MS * 1000);
                         }
-                        
-                        chunk_sent = true;
-                        float progress = (float)(stats.total_received * 100.0) / total_size;
-                        DBG_INFO("Progress: %.1f%% (%lu/%lu bytes, seq: %u, wraps: %u)\n",
-                                progress, stats.total_received, total_size,
-                                current_seq, stats.wrap_count);
+                    } else if (received_type == PKT_ERROR) {
+                        DBG_ERROR("Server error code=%d seq=%u size=%u\n",
+                                 packet.data[0], 
+                                 GET_SEQUENCE(packet.size_seq_type),
+                                 GET_SIZE(packet.size_seq_type));
+                        DBG_WARN("Received ERROR, retransmitting seq=%d\n", seq);
+                        retries++;
+                        usleep(RETRY_DELAY_MS * 1000);
+                    } else {
+                        // Unexpected packet type, ignore and retry
+                        DBG_WARN("Unexpected packet type=%d, retrying seq=%d\n", received_type, seq);
+                        retries++;
+                        usleep(RETRY_DELAY_MS * 1000);
                     }
+                } else {
+                    // No response, treat as timeout
+                    retries++;
+                    DBG_WARN("No response, retrying seq=%d (%d/%d)\n", seq, retries, MAX_RETRIES);
+                    usleep(RETRY_DELAY_MS * 1000);
                 }
-            }
-
-            if (!chunk_sent) {
-                retries++;
-                DBG_WARN("Retrying chunk seq=%d (attempt %d/%d)\n",
-                         seq, retries, MAX_RETRIES);
-                usleep(RETRY_DELAY_MS * 1000);
-                if (retries >= MAX_RETRIES) {
-                    DBG_ERROR("Failed to send chunk after %d retries\n", MAX_RETRIES);
-                    close(fd);
-                    return;
-                }
+                
+                // Add progress debugging
+                debug_transfer_progress(&stats, &data_packet);
             } else {
-                retries = 0;
+                // Send failed, increment retries
+                retries++;
+                DBG_WARN("Failed to send packet, retrying seq=%d (%d/%d)\n", seq, retries, MAX_RETRIES);
+                usleep(RETRY_DELAY_MS * 1000);
             }
+        }
+
+        if (!chunk_sent) {
+            DBG_ERROR("Failed to send chunk seq=%d after %d retries\n", seq, MAX_RETRIES);
+            close(fd);
+            return;
         }
     }
 
@@ -221,11 +289,12 @@ void backup_file(int socket, char *filename, struct sockaddr_ll *addr) {
         SET_TYPE(end_packet.size_seq_type, PKT_END_TX);
         SET_SEQUENCE(end_packet.size_seq_type, 0);
         SET_SIZE(end_packet.size_seq_type, 0);
+        end_packet.crc = calculate_crc_robust(&end_packet, true); // is_send = true
 
         int retries = 0;
         bool end_tx_sent = false;
         while (retries < MAX_RETRIES && !end_tx_sent) {
-            if (send_packet(socket, &end_packet, addr) >= 0 &&
+            if (send_packet(socket, &end_packet, addr, true) >= 0 &&
                 wait_for_ack(socket, &end_packet, addr, PKT_OK_CHSUM) == 0) {
                 print_transfer_summary(&stats);
                 DBG_INFO("Transfer completed successfully\n");
@@ -251,16 +320,19 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
     DBG_INFO("Starting restore of %s\n", filename);
 
     Packet packet = {0};
+    memset(packet.padding, 0, PAD_SIZE);
     packet.start_marker = START_MARKER;
     SET_TYPE(packet.size_seq_type, PKT_RESTORE);
     SET_SEQUENCE(packet.size_seq_type, 0);
     SET_SIZE(packet.size_seq_type, strlen(filename));
     strncpy(packet.data, filename, MAX_DATA_SIZE - 1);
     packet.data[MAX_DATA_SIZE - 1] = '\0';
-    send_packet(socket, &packet, addr);
+    send_packet(socket, &packet, addr, true);  // Add is_send = true
 
-    if (receive_packet(socket, &packet, addr) > 0) {
+    if (receive_packet(socket, &packet, addr, false) > 0) {  // Add is_send = false
         if (GET_TYPE(packet.size_seq_type) == PKT_ERROR) {
+            DBG_ERROR("Server rejected restore: %s (code=%d)\n",
+                     filename, packet.data[0]);
             if (packet.data[0] == ERR_NOT_FOUND) {
                 fprintf(stderr, RED "Error: File '%s' not found in backup\n" RESET, filename);
             } else {
@@ -285,7 +357,7 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
             uint8_t expected_seq = 0;
 
             while (stats.total_received < total_size) {
-                if (receive_packet(socket, &packet, addr) <= 0) {
+                if (receive_packet(socket, &packet, addr, false) <= 0) {  // Add is_send = false
                     fprintf(stderr, "No response from server\n");
                     close(fd);
                     return 1;
@@ -294,11 +366,15 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
                 switch (GET_TYPE(packet.size_seq_type)) {
                     case PKT_DATA:
                         uint8_t recv_seq = GET_SEQUENCE(packet.size_seq_type);
-                        if (SEQ_DIFF(recv_seq, expected_seq) != 0) {
-                            fprintf(stderr, "Sequence mismatch: expected %d, got %d\n",
-                                    expected_seq, recv_seq);
-                            close(fd);
-                            return 1;
+                        // Remove the strict sequence check and use SEQ_DIFF macro
+                        if (recv_seq != expected_seq) {
+                            if (recv_seq == 0 && expected_seq == SEQ_NUM_MAX) {
+                                // Handle sequence number wrap-around
+                                stats.wrap_count++;
+                            } else {
+                                DBG_WARN("Unexpected sequence: got %d, expected %d (wraps: %u)\n",
+                                        recv_seq, expected_seq, stats.wrap_count);
+                            }
                         }
 
                         if (write(fd, packet.data, GET_SIZE(packet.size_seq_type)) < 0) {
@@ -317,13 +393,13 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
                         Packet ack = {0};
                         ack.start_marker = START_MARKER;
                         SET_TYPE(ack.size_seq_type, PKT_OK);
-                        SET_SEQUENCE(ack.size_seq_type, GET_SEQUENCE(packet.size_seq_type));
+                        SET_SEQUENCE(ack.size_seq_type, recv_seq);  // Use received sequence number
                         SET_SIZE(ack.size_seq_type, 0);
-                        send_packet(socket, &ack, addr);
+                        send_packet(socket, &ack, addr, true);  // Add is_send = true
                         break;
                     case PKT_END_TX:
                         SET_TYPE(packet.size_seq_type, PKT_OK_CHSUM);
-                        send_packet(socket, &packet, addr);
+                        send_packet(socket, &packet, addr, true);  // Add is_send = true
                         print_transfer_summary(&stats);
                         DBG_INFO("Transfer completed successfully\n");
                         close(fd);
@@ -340,6 +416,17 @@ int restore_file(int socket, char *filename, struct sockaddr_ll *addr) {
                         fprintf(stderr, "Transfer failed\n");
                         close(fd);
                         return 1;
+                }
+                debug_packet_validation(&packet, calculate_crc_robust(&packet, false));  // Add is_send = false
+                
+                if (GET_TYPE(packet.size_seq_type) == PKT_DATA) {
+                    uint8_t recv_seq = GET_SEQUENCE(packet.size_seq_type);
+                    if (SEQ_DIFF(recv_seq, expected_seq) != 0) {
+                        debug_sequence_error(&stats, recv_seq);
+                    }
+                    
+                    // Add progress debugging
+                    debug_transfer_progress(&stats, &packet);
                 }
             }
 
@@ -358,15 +445,16 @@ void verify_file(int socket, char *filename, struct sockaddr_ll *addr) {
     DBG_INFO("Verifying %s\n", filename);
 
     Packet packet = {0};
+    memset(packet.padding, 0, PAD_SIZE);
     packet.start_marker = START_MARKER;
     SET_TYPE(packet.size_seq_type, PKT_VERIFY);
     SET_SEQUENCE(packet.size_seq_type, 0);
     SET_SIZE(packet.size_seq_type, strlen(filename));
     strncpy(packet.data, filename, MAX_DATA_SIZE - 1);
     packet.data[MAX_DATA_SIZE - 1] = '\0';
-    send_packet(socket, &packet, addr);
+    send_packet(socket, &packet, addr, true);  // Add is_send = true
 
-    if (receive_packet(socket, &packet, addr) > 0) {
+    if (receive_packet(socket, &packet, addr, false) > 0) {  // Add is_send = false
         if (GET_TYPE(packet.size_seq_type) == PKT_ACK) {
             printf("File exists in backup\n");
         } else if (GET_TYPE(packet.size_seq_type) == PKT_ERROR) {
@@ -379,6 +467,7 @@ void verify_file(int socket, char *filename, struct sockaddr_ll *addr) {
 
 int main(int argc, char *argv[]) {
     debug_init();
+    debug_init_error_log("client");
 
     if (argc == 2 && strcmp(argv[1], "-h") == 0) {
         display_help(argv[0]);
@@ -391,9 +480,9 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    int socket = cria_raw_socket(argv[1]);
+    int socket_fd = cria_raw_socket(argv[1]);
     struct sockaddr_ll addr;
-    if (get_interface_info(socket, argv[1], &addr) < 0) {
+    if (get_interface_info(socket_fd, argv[1], &addr) < 0) {
         exit(1);
     }
 
@@ -404,18 +493,32 @@ int main(int argc, char *argv[]) {
     }
     memcpy(addr.sll_addr, server_mac, ETH_ALEN);
 
-    if (strcmp(argv[2], "backup") == 0) {
-        backup_file(socket, argv[3], &addr);
-    } else if (strcmp(argv[2], "restaura") == 0) {
-        if (restore_file(socket, argv[3], &addr) != 0) {
-            fprintf(stderr, "An error occurred during file restoration.\n");
-            exit(1);
-        }
-    } else if (strcmp(argv[2], "verifica") == 0) {
-        verify_file(socket, argv[3], &addr);
-    } else {
+    ClientCommand cmd = parse_command(argv[2]);
+    if (cmd == CMD_INVALID) {
         fprintf(stderr, "Invalid command\n");
         exit(1);
+    }
+
+    ClientContext ctx;
+    init_client_context(&ctx, socket_fd, argv[3], cmd);
+    ctx.addr = addr;
+
+    switch (ctx.cmd) {
+        case CMD_BACKUP:
+            backup_file(ctx.socket, ctx.filename, &ctx.addr);
+            break;
+        case CMD_RESTORE:
+            if (restore_file(ctx.socket, ctx.filename, &ctx.addr) != 0) {
+                fprintf(stderr, "An error occurred during file restoration.\n");
+                exit(1);
+            }
+            break;
+        case CMD_VERIFY:
+            verify_file(ctx.socket, ctx.filename, &ctx.addr);
+            break;
+        default:
+            fprintf(stderr, "Invalid command\n");
+            exit(1);
     }
 
     return 0;

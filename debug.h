@@ -1,10 +1,11 @@
+// debug.h
 #ifndef DEBUG_H
 #define DEBUG_H
 
 #include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>
-
+#include <stdbool.h>
 // Debug levels
 enum {
     DBG_LEVEL_NONE  = 0,
@@ -32,6 +33,20 @@ struct TransferStats {
     uint32_t wrap_count;        // Track number of sequence wraps
     uint64_t total_sequences;   // Track total sequence count across wraps
     int had_errors;
+    uint32_t retransmissions;   // Track number of retransmissions
+    uint32_t duplicate_packets; // Track duplicate packets received
+    uint32_t crc_errors;       // Track CRC errors
+    uint32_t sequence_errors;  // Track sequence errors
+
+    // Add more detailed error tracking
+    struct {
+        uint32_t consecutive_crc_errors;
+        uint32_t consecutive_sequence_errors;
+        uint64_t last_error_time;      // Timestamp of last error
+        uint8_t last_valid_crc;        // Last valid CRC received
+        uint8_t last_computed_crc;     // Last computed CRC
+        uint8_t last_error_sequence;   // Sequence number when error occurred
+    } error_details;
 };
 
 // Export debug level
@@ -52,6 +67,13 @@ void debug_print(int level, const char *fmt, ...);
 #define DBG_TRACE(fmt, ...) \
     debug_print(DBG_LEVEL_TRACE, BLUE "[TRACE] " fmt RESET, ##__VA_ARGS__)
 
+// Add error log file handling
+void debug_init_error_log(const char *role);
+void debug_log_to_file(const char *fmt, ...);
+
+#define ERROR_LOG_CLIENT "client_errors.log"
+#define ERROR_LOG_SERVER "server_errors.log"
+
 // Function declarations
 void debug_init(void);
 void debug_hex_dump(const char *prefix, const void *data, size_t size);
@@ -62,5 +84,13 @@ void print_transfer_summary(const struct TransferStats *stats);
 void transfer_init_stats(struct TransferStats *stats, size_t expected_size);
 void transfer_update_stats(struct TransferStats *stats, size_t bytes, uint8_t seq);
 void transfer_handle_wrap(struct TransferStats *stats);
+void transfer_record_error(struct TransferStats *stats, int error_type);
+bool transfer_is_duplicate(const struct TransferStats *stats, uint8_t seq);
+
+// Add new debug functions
+void debug_packet_validation(const struct Packet *packet, uint8_t computed_crc);
+void debug_transfer_progress(const struct TransferStats *stats, const struct Packet *packet);
+void debug_sequence_error(const struct TransferStats *stats, uint8_t received_seq);
+void debug_retransmission(const struct TransferStats *stats, uint8_t seq, int attempt);
 
 #endif // DEBUG_H
