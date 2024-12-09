@@ -5,8 +5,11 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <limits.h>
+#include <time.h>
 
 #define BACKUP_DIR "./backup/"
+#define IDLE_TIMEOUT_SEC 10
+#define ACTIVITY_TIMEOUT_SEC 5
 
 typedef enum {
     STATE_IDLE = 0,
@@ -19,6 +22,17 @@ typedef struct {
     int current_fd;
     char backup_path[PATH_MAX];
 } ServerContext;
+
+typedef struct {
+    int fd;
+    char filename[PATH_MAX];
+    uint64_t file_size;
+    uint64_t bytes_sent;
+    uint8_t sequence;
+    time_t last_activity;
+} RestoreContext;
+
+static RestoreContext restore_ctx = {0};
 
 static int current_state = STATE_IDLE;
 static int current_fd = -1;
@@ -150,87 +164,142 @@ void handle_backup(int socket, Packet *packet, struct sockaddr_ll *addr, struct 
     debug_transfer_progress(stats, packet);
 }
 
+static void reset_restore_context() {
+    if (restore_ctx.fd >= 0) {
+        close(restore_ctx.fd);
+    }
+    memset(&restore_ctx, 0, sizeof(RestoreContext));
+    restore_ctx.fd = -1;
+}
+
 void handle_restore(int socket, Packet *packet, struct sockaddr_ll *addr) {
     DBG_INFO("Starting restore for file: %s\n", packet->data);
+    
+    // Reset context if it's a new request
+    if (strcmp(restore_ctx.filename, packet->data) != 0) {
+        reset_restore_context();
+        strncpy(restore_ctx.filename, packet->data, PATH_MAX - 1);
+    }
+
     char filepath[PATH_MAX];
     snprintf(filepath, sizeof(filepath), "%s%s", BACKUP_DIR, packet->data);
 
-    int fd = open(filepath, O_RDONLY);
-    if (fd < 0) {
-        DBG_WARN("File not found in backup: %s\n", packet->data);
-        send_error(socket, addr, ERR_NOT_FOUND, true);
-        return;
+    // Open file if not already open
+    if (restore_ctx.fd < 0) {
+        restore_ctx.fd = open(filepath, O_RDONLY);
+        if (restore_ctx.fd < 0) {
+            DBG_WARN("File not found in backup: %s\n", packet->data);
+            send_error(socket, addr, ERR_NOT_FOUND, true);
+            reset_restore_context();
+            return;
+        }
+
+        struct stat st;
+        if (fstat(restore_ctx.fd, &st) < 0) {
+            DBG_ERROR("Cannot stat file: %s\n", strerror(errno));
+            send_error(socket, addr, ERR_NO_ACCESS, true);
+            reset_restore_context();
+            return;
+        }
+        restore_ctx.file_size = st.st_size;
+        restore_ctx.bytes_sent = 0;
+        restore_ctx.sequence = 0;
     }
 
-    struct stat st;
-    if (fstat(fd, &st) < 0) {
-        DBG_ERROR("Cannot stat file: %s\n", strerror(errno));
-        send_error(socket, addr, ERR_NO_ACCESS, true);
-        close(fd);
-        return;
-    }
-    uint64_t total_size = st.st_size;
-    DBG_INFO("File size: %lu bytes\n", total_size);
+    DBG_INFO("Restore context - file: %s, size: %lu, sent: %lu\n",
+             restore_ctx.filename, restore_ctx.file_size, restore_ctx.bytes_sent);
 
+    // Send file size info
     Packet size_packet = {0};
     size_packet.start_marker = START_MARKER;
     SET_TYPE(size_packet.size_seq_type, PKT_SIZE);
-    memcpy(size_packet.data, &total_size, sizeof(size_t));
-    SET_SIZE(size_packet.size_seq_type, sizeof(size_t));
+    memcpy(size_packet.data, &restore_ctx.file_size, sizeof(uint64_t));
+    SET_SIZE(size_packet.size_seq_type, sizeof(uint64_t));
     send_packet(socket, &size_packet, addr, true);
 
+    // Set socket timeout
     if (set_socket_timeout(socket, SOCKET_TIMEOUT_MS) < 0) {
         DBG_ERROR("Failed to set restore timeout\n");
         send_error(socket, addr, ERR_TIMEOUT, true);
-        close(fd);
+        reset_restore_context();
+        return;
+    }
+
+    // Continue from where we left off
+    if (lseek(restore_ctx.fd, restore_ctx.bytes_sent, SEEK_SET) < 0) {
+        DBG_ERROR("Failed to seek to position %lu: %s\n", restore_ctx.bytes_sent, strerror(errno));
+        send_error(socket, addr, ERR_NO_ACCESS, true);
+        reset_restore_context();
         return;
     }
 
     char buffer[MAX_DATA_SIZE];
     ssize_t bytes;
-    uint8_t seq = 0;
     current_state = STATE_RECEIVING;
-    size_t bytes_sent = 0;
+    time_t last_active = time(NULL);
 
-    while ((bytes = read(fd, buffer, MAX_DATA_SIZE)) > 0) {
+    while (restore_ctx.bytes_sent < restore_ctx.file_size) {
+        // Check for timeout
+        if (time(NULL) - last_active > ACTIVITY_TIMEOUT_SEC) {
+            DBG_WARN("Restore timeout, saving context\n");
+            current_state = STATE_IDLE;
+            return;
+        }
+
+        bytes = read(restore_ctx.fd, buffer, MAX_DATA_SIZE);
+        if (bytes <= 0) break;
+
         Packet data = {0};
         data.start_marker = START_MARKER;
         SET_TYPE(data.size_seq_type, PKT_DATA);
-        SET_SEQUENCE(data.size_seq_type, seq & SEQ_NUM_MAX);
-        seq = (seq + 1) & SEQ_NUM_MAX;
+        SET_SEQUENCE(data.size_seq_type, restore_ctx.sequence);
         SET_SIZE(data.size_seq_type, bytes);
         memcpy(data.data, buffer, bytes);
 
-        size_t remaining = total_size - bytes_sent - bytes;
-        DBG_INFO("Preparing chunk: seq=%d, size=%zd, remaining=%zu\n", GET_SEQUENCE(data.size_seq_type), bytes, remaining);
-        DBG_INFO("Sending restore chunk: %zd bytes\n", bytes);
-        send_packet(socket, &data, addr, true);
+        int retries = 0;
+        bool chunk_sent = false;
 
-        bytes_sent += bytes;
-
-        Packet recv_packet;
-        if (receive_packet(socket, &recv_packet, addr, false) > 0) {
-            uint8_t expected_ack = (seq - 1) & SEQ_NUM_MAX;
-            if (GET_TYPE(recv_packet.size_seq_type) != PKT_OK || 
-                (GET_SEQUENCE(recv_packet.size_seq_type) & SEQ_NUM_MAX) != expected_ack) {
-                DBG_WARN("Did not receive expected ACK\n");
+        while (retries < MAX_RETRIES && !chunk_sent) {
+            if (send_packet(socket, &data, addr, true) >= 0) {
+                Packet ack;
+                if (receive_packet(socket, &ack, addr, false) > 0 &&
+                    GET_TYPE(ack.size_seq_type) == PKT_OK &&
+                    GET_SEQUENCE(ack.size_seq_type) == restore_ctx.sequence) {
+                    
+                    restore_ctx.bytes_sent += bytes;
+                    restore_ctx.sequence = (restore_ctx.sequence + 1) & SEQ_NUM_MAX;
+                    chunk_sent = true;
+                    last_active = time(NULL);
+                    
+                    float progress = (float)restore_ctx.bytes_sent / restore_ctx.file_size * 100;
+                    DBG_INFO("Progress: %.1f%% (%lu/%lu bytes)\n",
+                            progress, restore_ctx.bytes_sent, restore_ctx.file_size);
+                }
             }
-        } else {
-            DBG_WARN("No ACK received, proceeding\n");
+            if (!chunk_sent) {
+                retries++;
+                usleep(RETRY_DELAY_MS * 1000);
+            }
+        }
+
+        if (!chunk_sent) {
+            DBG_ERROR("Failed to send chunk after %d retries\n", MAX_RETRIES);
+            current_state = STATE_IDLE;
+            return;
         }
     }
 
+    // Send END_TX
     Packet end_tx = {0};
     end_tx.start_marker = START_MARKER;
     SET_TYPE(end_tx.size_seq_type, PKT_END_TX);
     SET_SEQUENCE(end_tx.size_seq_type, 0);
     SET_SIZE(end_tx.size_seq_type, 0);
     send_packet(socket, &end_tx, addr, true);
-    DBG_INFO("Sent END_TX packet\n");
 
-    set_socket_timeout(socket, TIMEOUT_SEC * 1000);
+    DBG_INFO("Restore completed successfully\n");
+    reset_restore_context();
     current_state = STATE_IDLE;
-    close(fd);
 }
 
 void handle_verify(int socket, Packet *packet, struct sockaddr_ll *addr) {
@@ -244,6 +313,27 @@ void handle_verify(int socket, Packet *packet, struct sockaddr_ll *addr) {
     } else {
         send_error(socket, addr, ERR_NOT_FOUND, true);
     }
+}
+
+static void reset_server_state() {
+    if (current_fd >= 0) {
+        close(current_fd);
+        current_fd = -1;
+    }
+    current_state = STATE_IDLE;
+    DBG_INFO("Server state reset, ready for new transactions\n");
+}
+
+static bool check_timeout(time_t last_activity) {
+    time_t now = time(NULL);
+    time_t timeout = (current_state == STATE_IDLE) ? IDLE_TIMEOUT_SEC : ACTIVITY_TIMEOUT_SEC;
+    
+    if (now - last_activity > timeout) {
+        DBG_WARN("Client timeout detected after %ld seconds\n", now - last_activity);
+        reset_server_state();
+        return true;
+    }
+    return false;
 }
 
 int main(int argc, char *argv[]) {
@@ -274,14 +364,25 @@ int main(int argc, char *argv[]) {
     mkdir(BACKUP_DIR, 0777);
     struct sockaddr_ll client_addr;
     struct TransferStats stats;
+    time_t last_activity = time(NULL);
 
     while (1) {
-        if (receive_packet(socket_fd, &packet, &client_addr, false) > 0) { // is_send = false
+        if (check_timeout(last_activity)) {
+            last_activity = time(NULL);
+            continue;
+        }
+
+        set_socket_timeout(socket_fd, ACTIVITY_TIMEOUT_SEC * 1000);
+
+        ssize_t recv_result = receive_packet(socket_fd, &packet, &client_addr, false);
+        if (recv_result > 0) {
+            last_activity = time(NULL);
+            
             switch (GET_TYPE(packet.size_seq_type)) {
                 case PKT_BACKUP:
                     if (current_state != STATE_IDLE) {
-                        send_error(socket_fd, &client_addr, ERR_SEQUENCE, true);
-                        break;
+                        DBG_WARN("Received backup request while busy, resetting state\n");
+                        reset_server_state();
                     }
                     current_state = STATE_RECEIVING;
                     size_t expected_file_size = *((size_t *)(packet.data + strlen(packet.data) + 1));
@@ -291,16 +392,17 @@ int main(int argc, char *argv[]) {
 
                 case PKT_DATA:
                     if (current_state != STATE_RECEIVING || current_fd < 0) {
+                        DBG_WARN("Received data packet in invalid state, ignoring\n");
                         send_error(socket_fd, &client_addr, ERR_SEQUENCE, true);
-                        break;
+                        continue;
                     }
                     handle_data_packet(socket_fd, &packet, current_fd, &client_addr, &stats);
                     break;
 
                 case PKT_END_TX:
                     if (current_state != STATE_RECEIVING || current_fd < 0) {
-                        send_error(socket_fd, &client_addr, ERR_SEQUENCE, true);
-                        break;
+                        DBG_WARN("Received END_TX in invalid state, ignoring\n");
+                        continue;
                     }
                     DBG_INFO("Received END_TX\n");
                     print_transfer_summary(&stats);
@@ -318,13 +420,12 @@ int main(int argc, char *argv[]) {
                         DBG_ERROR("Incomplete transfer: %zu/%zu bytes\n", stats.total_received, stats.total_expected);
                         send_error(socket_fd, &client_addr, ERR_SEQUENCE, true);
                     }
-                    close(current_fd);
-                    current_fd = -1;
-                    current_state = STATE_IDLE;
+                    reset_server_state();
                     break;
 
                 case PKT_RESTORE:
-                    if (current_state != STATE_IDLE) {
+                    if (current_state != STATE_IDLE && 
+                        strcmp(restore_ctx.filename, packet.data) != 0) {
                         send_error(socket_fd, &client_addr, ERR_SEQUENCE, true);
                         break;
                     }
@@ -348,6 +449,18 @@ int main(int argc, char *argv[]) {
                     }
                     current_state = STATE_IDLE;
                     break;
+
+                default:
+                    if (current_state != STATE_IDLE) {
+                        DBG_WARN("Timeout in non-idle state, resetting\n");
+                        reset_server_state();
+                    }
+                    break;
+            }
+        } else if (recv_result < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            DBG_ERROR("Receive error: %s\n", strerror(errno));
+            if (current_state != STATE_IDLE) {
+                reset_server_state();
             }
         }
     }

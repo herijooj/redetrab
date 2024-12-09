@@ -10,7 +10,7 @@
 // Add at top after includes
 static FILE *error_log_file = NULL;
 
-int debug_level = DBG_LEVEL_TRACE;  // Default level
+int debug_level = DBG_LEVEL_INFO;  // Default level
 
 static struct timeval start_time;
 
