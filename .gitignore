@@ -58,3 +58,4 @@ client
 server
 concat.sh
 CHANGES.MD
+T2/blackjack_debug.log

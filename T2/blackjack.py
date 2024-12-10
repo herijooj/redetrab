@@ -7,7 +7,7 @@ import sys
 import logging
 import colorama
 from colorama import Fore, Style
-import os  # For clearing the screen
+import os
 
 # Configure logging to record messages in an external file
 logging.basicConfig(
@@ -114,7 +114,10 @@ class BlackjackGame:
             self.handle_game_state(msg)
         elif msg_type == 'TOKEN':
             self.handle_token()
-        # ...existing message handlers...
+        elif msg_type == 'READY_FOR_RESULTS':
+            self.handle_ready_for_results(msg)
+        elif msg_type == 'GAME_FINISHED':
+            self.handle_game_finished(msg)
 
     def handle_token(self):
         if not self.game_started and self.machine_index == 0:
@@ -129,7 +132,6 @@ class BlackjackGame:
 
     def start_game(self):
         self.game_started = True
-        # ...existing game initialization code...
         self.broadcast_message({
             'type': 'GAME_START',
             'state': self.game_state,
@@ -138,7 +140,6 @@ class BlackjackGame:
 
     def process_current_player(self):
         if self.game_state['current_player'] == self.machine_index:
-            # ...existing player processing code...
             self.broadcast_message({
                 'type': 'GAME_STATE',
                 'state': self.game_state,
@@ -475,6 +476,11 @@ class BlackjackGame:
 
         print(f"\n{Fore.BLUE}=== Game Over ===\n{Style.RESET_ALL}")
         logging.info("Game over.")
+
+    def handle_game_finished(self, msg):
+        self.game_state = msg['state']
+        logging.info("Game finished message received.")
+        self.display_final_results()
 
     def get_player_action(self, player):
         valid_actions = ['STAND', 'HIT']
