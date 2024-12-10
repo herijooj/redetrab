@@ -48,7 +48,6 @@ essa estrutura é usada nas funções de debug, mas, acabei usando alguns campos
 3. Fim da transferência: O cliente envia um pacote END para o servidor.
     - **Client -> Server**: END_TX packet
     - **Server -> Client**: OK_CHSUM packet
-
 #### Verifica
 
 1. Início da transferência: O cliente envia um pacote VERIFY para o servidor.
