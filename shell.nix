@@ -15,6 +15,7 @@ pkgs.mkShell {
     glibc.dev
     pythonEnv
     python3
+    pkgs.python3Packages.colorama
   ];
 
   shellHook = ''
