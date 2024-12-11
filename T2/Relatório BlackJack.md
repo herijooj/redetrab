@@ -27,3 +27,29 @@ O estado do jogo é mantido de forma centralizada e sincronizado entre todas as 
 3. **Turno dos Jogadores**: Cada jogador, na sua vez, pode escolher entre ações como HIT, STAND, DOUBLE ou SURRENDER.
 4. **Turno do Dealer**: Após todos os jogadores, o dealer joga seguindo as regras do Blackjack.
 5. **Resultados**: Os resultados são calculados e exibidos para cada jogador.
+
+## Implementação Técnica
+
+## Uso Do Bastão
+
+O bastão (`TOKEN`) controla o acesso exclusivo aos recursos. Apenas quem o possui pode processar ações ou iniciar o jogo.
+
+### Estado Do Jogo
+
+- **Deck**: Cartas restantes.
+- **Players**: Lista com `cards`, `status`, `can_double` e `can_surrender`.
+- **Dealer**: Cartas do dealer.
+- **Current Player**: Jogador atual.
+- **Status**: Estado (`waiting`, `active`, `finished`).
+
+#### Exemplo De Estado
+
+```python
+self.game_state = {
+    'deck': [],
+    'players': [{'cards': [], 'status': 'active', 'can_double': True}],
+    'dealer': [],
+    'current_player': 0,
+    'status': 'waiting'
+}
+```
